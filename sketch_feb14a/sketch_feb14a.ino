@@ -19,17 +19,22 @@
 // Timing
 // ============================================
 #define BEACON_INTERVAL 8000
+#define SINK_BEACON_INTERVAL 4000
 #define DATA_INTERVAL 25000
 #define ROUTE_STABLE_TIME 30000
+#define ROUTE_TIMEOUT 30000
 
 // ============================================
 // RSSI Thresholds
 // ============================================
-#define RSSI_MIN_THRESHOLD -120  // Ignore signals weaker than this
+#define RSSI_MIN_THRESHOLD -125  // Allow weaker tunnel links during route discovery
 #define BROADCAST_ADDR 0xFF
 #define MAX_DATA_HOPS 8
 #define DEDUP_CACHE_SIZE 20
 #define DEDUP_ENTRY_TTL_MS 120000UL
+#define TX_POWER_SINK_DBM 8
+#define TX_POWER_REGULAR_DBM 14
+#define ENABLE_LORA_CRC false
 
 // ============================================
 // Packets
@@ -58,6 +63,7 @@ uint8_t myDistance = 255;
 uint8_t bestNeighbor = 255;
 int16_t bestNeighborRSSI = -200;
 unsigned long routeEstablishedTime = 0;
+unsigned long lastParentBeaconTime = 0;
 
 unsigned long lastBeacon = 0;
 unsigned long lastData = 0;
@@ -112,19 +118,25 @@ void setup() {
   LoRa.setSpreadingFactor(7);
   LoRa.setSignalBandwidth(125E3);
   LoRa.setSyncWord(0x12);
-  LoRa.enableCrc();
+  if (ENABLE_LORA_CRC) {
+    LoRa.enableCrc();
+    Serial.println(F("Payload CRC: ON"));
+  } else {
+    LoRa.disableCrc();
+    Serial.println(F("Payload CRC: OFF (compat mode)"));
+  }
 
-// TX POWER CONFIGURATION - ADJUST PER NODE
-#if MY_NODE_ID == 1
-  LoRa.setTxPower(5);  // Sink: LOW power (only Node 2 hears)
-  Serial.println(F("TX Power: 5 dBm (LOW)"));
-#elif MY_NODE_ID == 2
-  LoRa.setTxPower(10);  // Node 2: Medium power
-  Serial.println(F("TX Power: 10 dBm (MEDIUM)"));
-#else
-  LoRa.setTxPower(17);  // Others: Full power
-  Serial.println(F("TX Power: 17 dBm (HIGH)"));
-#endif
+  if (IS_SINK_NODE) {
+    LoRa.setTxPower(TX_POWER_SINK_DBM);
+    Serial.print(F("TX Power: "));
+    Serial.print(TX_POWER_SINK_DBM);
+    Serial.println(F(" dBm (SINK)"));
+  } else {
+    LoRa.setTxPower(TX_POWER_REGULAR_DBM);
+    Serial.print(F("TX Power: "));
+    Serial.print(TX_POWER_REGULAR_DBM);
+    Serial.println(F(" dBm (REGULAR)"));
+  }
 
   Serial.println(F("LoRa OK!"));
 
@@ -143,10 +155,21 @@ void setup() {
 // ============================================
 void loop() {
   unsigned long now = millis();
+  unsigned long beaconInterval = IS_SINK_NODE ? SINK_BEACON_INTERVAL : BEACON_INTERVAL;
 
   listenForPackets();
 
-  if (now - lastBeacon > BEACON_INTERVAL) {
+  if (!IS_SINK_NODE && bestNeighbor != 255 && (now - lastParentBeaconTime > ROUTE_TIMEOUT)) {
+    Serial.print(F("[ROUTE LOST] Parent N"));
+    Serial.print(bestNeighbor);
+    Serial.println(F(" timed out, resetting route"));
+    bestNeighbor = 255;
+    myDistance = 255;
+    bestNeighborRSSI = -200;
+    routeEstablishedTime = 0;
+  }
+
+  if (now - lastBeacon > beaconInterval) {
     delay(random(0, 500));
     sendBeacon();
     lastBeacon = now;
@@ -285,21 +308,43 @@ void listenForPackets() {
     Serial.println(rssi);
 
     if (!IS_SINK_NODE) {
+      if (beacon->distance == 255) {
+        if (beacon->fromNode == bestNeighbor && myDistance != 255) {
+          Serial.print(F("[PARENT LOST ROUTE] N"));
+          Serial.println(bestNeighbor);
+          bestNeighbor = 255;
+          myDistance = 255;
+          bestNeighborRSSI = -200;
+          routeEstablishedTime = 0;
+        }
+        return;
+      }
+
       bool routeChanged = false;
       uint8_t oldDist = myDistance;
+      uint8_t candidateDist = beacon->distance + 1;
 
-      if (beacon->distance < myDistance - 1) {
+      if (myDistance == 255 || candidateDist < myDistance) {
         bestNeighbor = beacon->fromNode;
         bestNeighborRSSI = rssi;
-        myDistance = beacon->distance + 1;
+        myDistance = candidateDist;
         routeChanged = true;
-      } else if (beacon->distance == myDistance - 1 && rssi > bestNeighborRSSI + 10) {
+      } else if (candidateDist == myDistance && rssi > bestNeighborRSSI + 6) {
         bestNeighbor = beacon->fromNode;
         bestNeighborRSSI = rssi;
         routeChanged = true;
+      } else if (beacon->fromNode == bestNeighbor) {
+        // Keep parent freshness and track drift in parent's advertised distance.
+        lastParentBeaconTime = millis();
+        bestNeighborRSSI = rssi;
+        if (myDistance != candidateDist) {
+          myDistance = candidateDist;
+          routeChanged = true;
+        }
       }
 
       if (routeChanged) {
+        lastParentBeaconTime = millis();
         routeEstablishedTime = millis();
         Serial.print(F("** ROUTE UPDATE: "));
         if (oldDist == 255) Serial.print(F("???"));
