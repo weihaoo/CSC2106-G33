@@ -1,18 +1,26 @@
 /*
- * SIMPLE LoRa Mesh Network - NO CHECKSUM VERSION
- * Just copy this ENTIRE file and upload!
+ * SIMPLE LoRa Mesh Network - WITH NETWORK ID FILTER
+ * Only accepts packets from YOUR network!
  * 
- * IMPORTANT: Change MY_NODE_ID for each Arduino!
+ * IMPORTANT: 
+ * 1. Change MY_NODE_ID for each Arduino (1, 2, 3, 4, 5)
+ * 2. Change MY_NETWORK_ID to something unique (your student ID last 4 digits?)
  */
 
 #include <SPI.h>
 #include <LoRa.h>
 
 // ============================================
-// CHANGE THIS FOR EACH NODE!
+// CHANGE THESE FOR EACH NODE!
 // ============================================
 #define MY_NODE_ID      1        // Node 1, 2, 3, 4, or 5
 #define IS_SINK_NODE    false    // true for sink, false for regular
+
+// ============================================
+// CHANGE THIS TO YOUR UNIQUE NETWORK ID!
+// ============================================
+#define MY_NETWORK_ID   0xAB    // Change to 0x12, 0x34, 0x99, anything!
+                                 // Same for ALL your nodes!
 
 // ============================================
 // Hardware pins (don't change)
@@ -22,15 +30,17 @@
 #define LORA_DIO0       2
 
 // ============================================
-// Simple packets (no checksum!)
+// Packets with Network ID
 // ============================================
 struct BeaconPacket {
+  uint8_t networkId;      // NEW! Must match MY_NETWORK_ID
   uint8_t type;           // Always 1 for beacon
   uint8_t fromNode;       // Who sent this
   uint8_t distance;       // How far from sink
 } __attribute__((packed));
 
 struct DataPacket {
+  uint8_t networkId;      // NEW! Must match MY_NETWORK_ID
   uint8_t type;           // Always 2 for data
   uint8_t fromNode;       // Who sent this
   uint8_t toNode;         // Who should receive
@@ -41,12 +51,16 @@ struct DataPacket {
 // ============================================
 // Network state
 // ============================================
-uint8_t myDistance = 255;        // My distance to sink
-uint8_t bestNeighbor = 255;      // Best node to send to
-int16_t bestNeighborRSSI = -200; // Signal strength
+uint8_t myDistance = 255;
+uint8_t bestNeighbor = 255;
+int16_t bestNeighborRSSI = -200;
 
 unsigned long lastBeacon = 0;
 unsigned long lastData = 0;
+
+// Statistics
+uint16_t packetsReceived = 0;
+uint16_t packetsIgnored = 0;
 
 // ============================================
 // SETUP
@@ -55,18 +69,20 @@ void setup() {
   Serial.begin(9600);
   while (!Serial);
   
-  Serial.println("\n============================");
-  Serial.print("Node ID: ");
+  Serial.println(F("\n============================"));
+  Serial.print(F("Node ID: "));
   Serial.println(MY_NODE_ID);
-  Serial.print("Type: ");
-  Serial.println(IS_SINK_NODE ? "SINK" : "REGULAR");
-  Serial.println("============================\n");
+  Serial.print(F("Network ID: 0x"));
+  Serial.println(MY_NETWORK_ID, HEX);
+  Serial.print(F("Type: "));
+  Serial.println(IS_SINK_NODE ? F("SINK") : F("REGULAR"));
+  Serial.println(F("============================\n"));
   
   // Setup LoRa
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
   
-  if (!LoRa.begin(923E6)) {  // 923 MHz for Singapore
-    Serial.println("LoRa FAILED!");
+  if (!LoRa.begin(923E6)) {
+    Serial.println(F("LoRa FAILED!"));
     while (1);
   }
   
@@ -75,12 +91,11 @@ void setup() {
   LoRa.setTxPower(17);
   LoRa.setSyncWord(0x12);
   
-  Serial.println("LoRa OK!\n");
+  Serial.println(F("LoRa OK!\n"));
   
-  // Sink nodes start at distance 0
   if (IS_SINK_NODE) {
     myDistance = 0;
-    Serial.println("I am SINK (distance = 0)\n");
+    Serial.println(F("I am SINK (distance = 0)\n"));
   }
 }
 
@@ -90,19 +105,23 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   
-  // Listen for packets
   listenForPackets();
   
-  // Send beacon every 5 seconds
   if (now - lastBeacon > 5000) {
     sendBeacon();
     lastBeacon = now;
   }
   
-  // Send data every 20 seconds (regular nodes only)
   if (!IS_SINK_NODE && now - lastData > 20000) {
     sendData();
     lastData = now;
+  }
+  
+  // Print stats every 60 seconds
+  static unsigned long lastStats = 0;
+  if (now - lastStats > 60000) {
+    printStats();
+    lastStats = now;
   }
   
   delay(10);
@@ -113,6 +132,7 @@ void loop() {
 // ============================================
 void sendBeacon() {
   BeaconPacket pkt;
+  pkt.networkId = MY_NETWORK_ID;  // ADD NETWORK ID!
   pkt.type = 1;
   pkt.fromNode = MY_NODE_ID;
   pkt.distance = myDistance;
@@ -121,7 +141,7 @@ void sendBeacon() {
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
   LoRa.endPacket();
   
-  Serial.print(">>> Beacon sent | Distance: ");
+  Serial.print(F(">>> Beacon sent | Distance: "));
   Serial.println(myDistance);
 }
 
@@ -129,27 +149,26 @@ void sendBeacon() {
 // SEND DATA
 // ============================================
 void sendData() {
-  // Check if we have a route
   if (bestNeighbor == 255) {
-    Serial.println("XXX No route to sink!");
+    Serial.println(F("XXX No route to sink!"));
     return;
   }
   
-  // Make packet
   DataPacket pkt;
+  pkt.networkId = MY_NETWORK_ID;  // ADD NETWORK ID!
   pkt.type = 2;
   pkt.fromNode = MY_NODE_ID;
   pkt.toNode = bestNeighbor;
   pkt.hops = 0;
-  pkt.temperature = 20.0 + random(0, 100) / 10.0;  // Fake temperature
+  pkt.temperature = 20.0 + random(0, 100) / 10.0;
   
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
   LoRa.endPacket();
   
-  Serial.print(">>> Data sent: ");
+  Serial.print(F(">>> Data sent: "));
   Serial.print(pkt.temperature);
-  Serial.print("°C -> Node ");
+  Serial.print(F("°C -> Node "));
   Serial.println(bestNeighbor);
 }
 
@@ -158,7 +177,7 @@ void sendData() {
 // ============================================
 void listenForPackets() {
   int packetSize = LoRa.parsePacket();
-  if (packetSize == 0) return;  // No packet
+  if (packetSize == 0) return;
   
   uint8_t buffer[32];
   int len = 0;
@@ -167,46 +186,52 @@ void listenForPackets() {
     buffer[len++] = LoRa.read();
   }
   
-  if (len < 3) return;  // Too small
+  if (len < 4) return;  // Too small
   
-  uint8_t type = buffer[0];
-  uint8_t fromNode = buffer[1];
+  // CHECK NETWORK ID FIRST!
+  uint8_t networkId = buffer[0];
+  if (networkId != MY_NETWORK_ID) {
+    packetsIgnored++;
+    // Uncomment next line to see foreign packets:
+    // Serial.print(F("! Foreign network: 0x")); Serial.println(networkId, HEX);
+    return;  // IGNORE! Not our network!
+  }
+  
+  uint8_t type = buffer[1];
+  uint8_t fromNode = buffer[2];
   
   // Ignore my own packets
   if (fromNode == MY_NODE_ID) return;
   
+  packetsReceived++;
   int16_t rssi = LoRa.packetRssi();
   
   // Handle beacon
   if (type == 1 && len == sizeof(BeaconPacket)) {
     BeaconPacket* beacon = (BeaconPacket*)buffer;
     
-    Serial.print("<<< Beacon from Node ");
+    Serial.print(F("<<< Beacon from Node "));
     Serial.print(beacon->fromNode);
-    Serial.print(" | Distance: ");
+    Serial.print(F(" | Distance: "));
     Serial.print(beacon->distance);
-    Serial.print(" | RSSI: ");
+    Serial.print(F(" | RSSI: "));
     Serial.println(rssi);
     
-    // Update my routing
     if (!IS_SINK_NODE) {
-      // If this neighbor is closer to sink
       if (beacon->distance < myDistance - 1) {
         bestNeighbor = beacon->fromNode;
         bestNeighborRSSI = rssi;
         myDistance = beacon->distance + 1;
         
-        Serial.print("*** NEW ROUTE! Distance now: ");
+        Serial.print(F("*** NEW ROUTE! Distance now: "));
         Serial.print(myDistance);
-        Serial.print(" via Node ");
+        Serial.print(F(" via Node "));
         Serial.println(bestNeighbor);
       }
-      // If same distance but better signal
       else if (beacon->distance == myDistance - 1 && rssi > bestNeighborRSSI) {
         bestNeighbor = beacon->fromNode;
         bestNeighborRSSI = rssi;
-        
-        Serial.print("*** BETTER ROUTE! via Node ");
+        Serial.print(F("*** BETTER ROUTE! via Node "));
         Serial.println(bestNeighbor);
       }
     }
@@ -216,44 +241,62 @@ void listenForPackets() {
   else if (type == 2 && len == sizeof(DataPacket)) {
     DataPacket* data = (DataPacket*)buffer;
     
-    Serial.print("<<< Data from Node ");
+    Serial.print(F("<<< Data from Node "));
     Serial.print(data->fromNode);
-    Serial.print(" | Temp: ");
+    Serial.print(F(" | Temp: "));
     Serial.print(data->temperature);
-    Serial.print("°C | Hops: ");
+    Serial.print(F("°C | Hops: "));
     Serial.println(data->hops);
     
-    // If I'm the sink - DONE!
     if (IS_SINK_NODE) {
-      Serial.println("=========================");
-      Serial.println("SINK RECEIVED DATA!");
-      Serial.print("From: Node ");
+      Serial.println(F("========================="));
+      Serial.println(F("SINK RECEIVED DATA!"));
+      Serial.print(F("From: Node "));
       Serial.println(data->fromNode);
-      Serial.print("Temperature: ");
+      Serial.print(F("Temperature: "));
       Serial.print(data->temperature);
-      Serial.println("°C");
-      Serial.print("Hops: ");
+      Serial.println(F("°C"));
+      Serial.print(F("Hops: "));
       Serial.println(data->hops);
-      Serial.println("=========================");
+      Serial.println(F("========================="));
       return;
     }
     
-    // If it's for me - forward it
     if (data->toNode == MY_NODE_ID) {
-      // Forward to my best neighbor
       if (bestNeighbor != 255) {
         data->toNode = bestNeighbor;
         data->hops++;
         
-        delay(random(10, 50));  // Random delay
+        delay(random(10, 50));
         
         LoRa.beginPacket();
         LoRa.write((uint8_t*)data, sizeof(DataPacket));
         LoRa.endPacket();
         
-        Serial.print(">>> Forwarded to Node ");
+        Serial.print(F(">>> Forwarded to Node "));
         Serial.println(bestNeighbor);
       }
     }
   }
+}
+
+// ============================================
+// PRINT STATISTICS
+// ============================================
+void printStats() {
+  Serial.println(F("\n--- Statistics ---"));
+  Serial.print(F("Packets from my network: "));
+  Serial.println(packetsReceived);
+  Serial.print(F("Foreign packets ignored: "));
+  Serial.println(packetsIgnored);
+  Serial.print(F("Current distance: "));
+  Serial.println(myDistance);
+  Serial.print(F("Best neighbor: "));
+  if (bestNeighbor == 255) {
+    Serial.println(F("None"));
+  } else {
+    Serial.print(F("Node "));
+    Serial.println(bestNeighbor);
+  }
+  Serial.println(F("------------------\n"));
 }
