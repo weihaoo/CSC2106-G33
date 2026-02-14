@@ -4,14 +4,6 @@
 
 #include <SPI.h>
 #include <LoRa.h>
-
-#define MY_NODE_ID      1
-#define IS_SINK_NODE    true
-#define MY_NETWORK_ID   0x67
-
-// ============================================
-// Hardware
-
 // ============================================
 // CHANGE THESE FOR EACH NODE!
 // ============================================
