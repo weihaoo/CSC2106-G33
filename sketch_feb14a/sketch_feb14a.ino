@@ -5,14 +5,13 @@
 #include <SPI.h>
 #include <LoRa.h>
 
-<<<<<<< HEAD
 #define MY_NODE_ID      1
 #define IS_SINK_NODE    true
 #define MY_NETWORK_ID   0x67
 
 // ============================================
 // Hardware
-=======
+
 // ============================================
 // CHANGE THESE FOR EACH NODE!
 // ============================================
@@ -27,7 +26,7 @@
 
 // ============================================
 // Hardware pins (don't change)
->>>>>>> 0a668984f7f208fa9693fdcea3f8a42ff8c91ca6
+
 // ============================================
 #define LORA_SS         10
 #define LORA_RST        9
