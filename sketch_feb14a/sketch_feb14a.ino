@@ -4,8 +4,8 @@
 // ============================================
 // CONFIGURATION
 // ============================================
-#define MY_NODE_ID 1        // CHANGE: 1, 2, 45, 89
-#define IS_SINK_NODE true   // true for sink, false for others
+#define MY_NODE_ID 5        // CHANGE: 1, 2, 45, 89
+#define IS_SINK_NODE false   // true for sink, false for others
 #define MY_NETWORK_ID 0x67  // Same for ALL your nodes
 
 // ============================================
@@ -25,8 +25,11 @@
 // ============================================
 // RSSI Thresholds
 // ============================================
-#define RSSI_MIN_THRESHOLD -100  // Ignore signals weaker than this
+#define RSSI_MIN_THRESHOLD -120  // Ignore signals weaker than this
 #define BROADCAST_ADDR 0xFF
+#define MAX_DATA_HOPS 8
+#define DEDUP_CACHE_SIZE 20
+#define DEDUP_ENTRY_TTL_MS 120000UL
 
 // ============================================
 // Packets
@@ -66,6 +69,21 @@ uint16_t dataRx = 0;
 uint16_t dataFwd = 0;
 uint16_t foreignIgnored = 0;
 uint16_t weakSignalIgnored = 0;
+uint16_t duplicateDropped = 0;
+uint16_t ttlDropped = 0;
+uint16_t loopDropped = 0;
+
+struct SeenDataPacket {
+  uint8_t originNode;
+  uint16_t packetCount;
+  unsigned long seenAt;
+};
+
+SeenDataPacket seenDataCache[DEDUP_CACHE_SIZE];
+uint8_t seenDataCacheIndex = 0;
+
+bool isDuplicateDataPacket(uint8_t originNode, uint16_t packetCount, unsigned long now);
+void rememberDataPacket(uint8_t originNode, uint16_t packetCount, unsigned long now);
 
 // ============================================
 // SETUP
@@ -94,6 +112,7 @@ void setup() {
   LoRa.setSpreadingFactor(7);
   LoRa.setSignalBandwidth(125E3);
   LoRa.setSyncWord(0x12);
+  LoRa.enableCrc();
 
 // TX POWER CONFIGURATION - ADJUST PER NODE
 #if MY_NODE_ID == 1
@@ -191,6 +210,7 @@ void sendData() {
   pkt.hops = 0;
   pkt.originNode = MY_NODE_ID;     // CHANGED: Send my node ID
   pkt.packetCount = dataSent + 1;  // CHANGED: Packet number
+  rememberDataPacket(pkt.originNode, pkt.packetCount, millis());
 
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
@@ -250,7 +270,9 @@ void listenForPackets() {
       Serial.print(beacon->fromNode);
       Serial.print(F(" RSSI:"));
       Serial.print(rssi);
-      Serial.print(F(" (threshold:-100) Total:"));
+      Serial.print(F(" (threshold:"));
+      Serial.print(RSSI_MIN_THRESHOLD);
+      Serial.print(F(") Total:"));
       Serial.println(weakSignalIgnored);
       return;
     }
@@ -293,6 +315,36 @@ void listenForPackets() {
   // DATA
   else if (type == 2 && len == sizeof(DataPacket)) {
     DataPacket* data = (DataPacket*)buffer;
+    unsigned long now = millis();
+
+    if (data->hops >= MAX_DATA_HOPS) {
+      ttlDropped++;
+      Serial.print(F("[DROP TTL] Origin:N"));
+      Serial.print(data->originNode);
+      Serial.print(F(" Pkt#"));
+      Serial.print(data->packetCount);
+      Serial.print(F(" Hops:"));
+      Serial.print(data->hops);
+      Serial.print(F(" (max:"));
+      Serial.print(MAX_DATA_HOPS);
+      Serial.println(F(")"));
+      return;
+    }
+
+    if (isDuplicateDataPacket(data->originNode, data->packetCount, now)) {
+      duplicateDropped++;
+      Serial.print(F("[DROP DUP] Origin:N"));
+      Serial.print(data->originNode);
+      Serial.print(F(" Pkt#"));
+      Serial.print(data->packetCount);
+      Serial.print(F(" From:N"));
+      Serial.print(data->fromNode);
+      Serial.print(F(" Hops:"));
+      Serial.println(data->hops);
+      return;
+    }
+
+    rememberDataPacket(data->originNode, data->packetCount, now);
     dataRx++;
 
     Serial.print(F("[DATA IN] Origin:N"));
@@ -328,19 +380,26 @@ void listenForPackets() {
       return;
     }
 
-    // FORWARD DATA - if packet is for me, broadcast, OR if I can help route it to sink
+    // FORWARD DATA - only if packet is addressed to me or broadcast
     bool shouldForward = false;
 
     if (data->toNode == MY_NODE_ID || data->toNode == BROADCAST_ADDR) {
       shouldForward = true;  // Explicitly for me or broadcast
-    } else if (data->toNode == 1 && bestNeighbor != 255 && myDistance < 255) {
-      // Packet is destined for sink, and I have a route to sink
-      shouldForward = true;
     }
 
     if (shouldForward) {
       if (bestNeighbor == 255) {
         Serial.println(F("[ERROR] Can't forward - no next hop!"));
+        return;
+      }
+      if (bestNeighbor == data->fromNode) {
+        loopDropped++;
+        Serial.print(F("[DROP LOOP] Origin:N"));
+        Serial.print(data->originNode);
+        Serial.print(F(" Pkt#"));
+        Serial.print(data->packetCount);
+        Serial.print(F(" Next hop equals sender N"));
+        Serial.println(bestNeighbor);
         return;
       }
 
@@ -375,6 +434,26 @@ void listenForPackets() {
       Serial.println(F(")"));
     }
   }
+}
+
+bool isDuplicateDataPacket(uint8_t originNode, uint16_t packetCount, unsigned long now) {
+  for (uint8_t i = 0; i < DEDUP_CACHE_SIZE; i++) {
+    if (seenDataCache[i].originNode != originNode) continue;
+    if (seenDataCache[i].packetCount != packetCount) continue;
+
+    if ((now - seenDataCache[i].seenAt) <= DEDUP_ENTRY_TTL_MS) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void rememberDataPacket(uint8_t originNode, uint16_t packetCount, unsigned long now) {
+  seenDataCache[seenDataCacheIndex].originNode = originNode;
+  seenDataCache[seenDataCacheIndex].packetCount = packetCount;
+  seenDataCache[seenDataCacheIndex].seenAt = now;
+  seenDataCacheIndex = (seenDataCacheIndex + 1) % DEDUP_CACHE_SIZE;
 }
 
 // ============================================
@@ -425,5 +504,11 @@ void printStatus() {
   Serial.print(F("║ Foreign Ignored: "));
   Serial.print(foreignIgnored);
   Serial.println(F("          ║"));
+  Serial.print(F("[DROP STATS] Dup:"));
+  Serial.print(duplicateDropped);
+  Serial.print(F(" TTL:"));
+  Serial.print(ttlDropped);
+  Serial.print(F(" Loop:"));
+  Serial.println(loopDropped);
   Serial.println(F("╚═══════════════════════════════╝\n"));
 }
