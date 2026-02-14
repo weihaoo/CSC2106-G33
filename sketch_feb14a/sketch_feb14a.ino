@@ -23,7 +23,7 @@
 #define ROUTE_STABLE_TIME   30000
 
 // ============================================
-// RSSI Thresholds (ADD THIS!)
+// RSSI Thresholds
 // ============================================
 #define RSSI_MIN_THRESHOLD  -100  // Ignore signals weaker than this
 #define BROADCAST_ADDR      0xFF
@@ -44,7 +44,8 @@ struct DataPacket {
   uint8_t fromNode;
   uint8_t toNode;
   uint8_t hops;
-  float temperature;
+  uint8_t originNode;    // CHANGED: Store origin node ID
+  uint16_t packetCount;  // CHANGED: Packet counter for this node
 } __attribute__((packed));
 
 // ============================================
@@ -64,7 +65,7 @@ uint16_t dataSent = 0;
 uint16_t dataRx = 0;
 uint16_t dataFwd = 0;
 uint16_t foreignIgnored = 0;
-uint16_t weakSignalIgnored = 0;  // NEW
+uint16_t weakSignalIgnored = 0;
 
 // ============================================
 // SETUP
@@ -187,7 +188,8 @@ void sendData() {
   pkt.fromNode = MY_NODE_ID;
   pkt.toNode = bestNeighbor;
   pkt.hops = 0;
-  pkt.temperature = 20.0 + random(0, 100) / 10.0;
+  pkt.originNode = MY_NODE_ID;    // CHANGED: Send my node ID
+  pkt.packetCount = dataSent + 1; // CHANGED: Packet number
   
   LoRa.beginPacket();
   LoRa.write((uint8_t*)&pkt, sizeof(pkt));
@@ -197,11 +199,11 @@ void sendData() {
   
   Serial.print(F("[DATA OUT] N"));
   Serial.print(MY_NODE_ID);
-  Serial.print(F(" Temp:"));
-  Serial.print(pkt.temperature, 1);
-  Serial.print(F("C->N"));
+  Serial.print(F(" Pkt#"));
+  Serial.print(pkt.packetCount);
+  Serial.print(F(" ->N"));
   Serial.print(bestNeighbor);
-  Serial.print(F(" Hops:0 #"));
+  Serial.print(F(" Hops:0 Total:"));
   Serial.println(dataSent);
 }
 
@@ -225,7 +227,7 @@ void listenForPackets() {
   
   if (networkId != MY_NETWORK_ID) {
     foreignIgnored++;
-    return;  // Silently ignore
+    return;
   }
   
   uint8_t type = buffer[1];
@@ -293,33 +295,40 @@ void listenForPackets() {
     DataPacket* data = (DataPacket*)buffer;
     dataRx++;
     
-    Serial.print(F("[DATA IN] From:N"));
+    Serial.print(F("[DATA IN] Origin:N"));
+    Serial.print(data->originNode);     // CHANGED: Show origin
+    Serial.print(F(" Pkt#"));
+    Serial.print(data->packetCount);    // CHANGED: Show packet number
+    Serial.print(F(" From:N"));
     Serial.print(data->fromNode);
     Serial.print(F(" To:N"));
     Serial.print(data->toNode);
-    Serial.print(F(" Temp:"));
-    Serial.print(data->temperature, 1);
-    Serial.print(F("C Hops:"));
+    Serial.print(F(" Hops:"));
     Serial.println(data->hops);
     
     // SINK RECEIVED
     if (IS_SINK_NODE) {
       Serial.println(F(""));
-      Serial.println(F("*** SINK RECEIVED DATA! ***"));
-      Serial.print(F("Origin: N"));
-      Serial.println(data->fromNode);
-      Serial.print(F("Temp: "));
-      Serial.print(data->temperature, 1);
-      Serial.println(F("C"));
-      Serial.print(F("Hops: "));
-      Serial.println(data->hops);
-      Serial.print(F("Total RX: "));
-      Serial.println(dataRx);
-      Serial.println(F("***************************\n"));
+      Serial.println(F("╔═══════════════════════════════╗"));
+      Serial.println(F("║ 🎯 SINK RECEIVED DATA! 🎯    ║"));
+      Serial.println(F("╠═══════════════════════════════╣"));
+      Serial.print(F("║ Origin Node: "));
+      Serial.print(data->originNode);
+      Serial.println(F("                 ║"));
+      Serial.print(F("║ Packet Number: "));
+      Serial.print(data->packetCount);
+      Serial.println(F("             ║"));
+      Serial.print(F("║ Hops Traveled: "));
+      Serial.print(data->hops);
+      Serial.println(F("                ║"));
+      Serial.print(F("║ Total Received: "));
+      Serial.print(dataRx);
+      Serial.println(F("             ║"));
+      Serial.println(F("╚═══════════════════════════════╝\n"));
       return;
     }
     
-    // FORWARD DATA (CRITICAL FIX!)
+    // FORWARD DATA
     if (data->toNode == MY_NODE_ID || data->toNode == BROADCAST_ADDR) {
       
       if (bestNeighbor == 255) {
@@ -328,14 +337,17 @@ void listenForPackets() {
       }
       
       // UPDATE PACKET
-      data->toNode = bestNeighbor;
-      data->hops++;
+      data->fromNode = MY_NODE_ID;  // I'm now the sender
+      data->toNode = bestNeighbor;  // Send to my best neighbor
+      data->hops++;                 // Increment hop count
       
-      Serial.print(F("[FORWARDING] N"));
-      Serial.print(data->fromNode);
-      Serial.print(F("'s data -> N"));
+      Serial.print(F("[FORWARDING] Origin:N"));
+      Serial.print(data->originNode);
+      Serial.print(F(" Pkt#"));
+      Serial.print(data->packetCount);
+      Serial.print(F(" ->N"));
       Serial.print(bestNeighbor);
-      Serial.print(F(" (Hops now:"));
+      Serial.print(F(" (Hops:"));
       Serial.print(data->hops);
       Serial.println(F(")"));
       
@@ -361,25 +373,46 @@ void listenForPackets() {
 // STATUS
 // ============================================
 void printStatus() {
-  Serial.println(F("\n--- STATUS ---"));
-  Serial.print(F("Dist:")); 
+  Serial.println(F("\n╔═══════════════════════════════╗"));
+  Serial.println(F("║      STATUS REPORT            ║"));
+  Serial.println(F("╠═══════════════════════════════╣"));
+  Serial.print(F("║ My ID: N"));
+  Serial.print(MY_NODE_ID);
+  Serial.print(F(" | Dist: "));
   if (myDistance == 255) Serial.print(F("???"));
   else Serial.print(myDistance);
-  Serial.print(F(" NextHop:"));
-  if (bestNeighbor == 255) Serial.println(F("None"));
-  else { Serial.print(F("N")); Serial.println(bestNeighbor); }
+  Serial.println(F("        ║"));
   
-  Serial.print(F("BCN TX:")); Serial.print(beaconsSent);
-  Serial.print(F(" RX:")); Serial.println(beaconsRx);
+  Serial.print(F("║ Next Hop: "));
+  if (bestNeighbor == 255) Serial.print(F("None"));
+  else { Serial.print(F("N")); Serial.print(bestNeighbor); }
+  Serial.println(F("              ║"));
+  
+  Serial.println(F("╟───────────────────────────────╢"));
+  Serial.print(F("║ Beacons TX: "));
+  Serial.print(beaconsSent);
+  Serial.print(F(" | RX: "));
+  Serial.print(beaconsRx);
+  Serial.println(F("      ║"));
   
   if (!IS_SINK_NODE) {
-    Serial.print(F("DATA TX:")); Serial.print(dataSent);
-    Serial.print(F(" FWD:")); Serial.println(dataFwd);
+    Serial.print(F("║ Data TX: "));
+    Serial.print(dataSent);
+    Serial.print(F(" | Forwarded: "));
+    Serial.print(dataFwd);
+    Serial.println(F("  ║"));
   } else {
-    Serial.print(F("DATA RX:")); Serial.println(dataRx);
+    Serial.print(F("║ Data Received: "));
+    Serial.print(dataRx);
+    Serial.println(F("            ║"));
   }
   
-  Serial.print(F("Weak ignored:")); Serial.println(weakSignalIgnored);
-  Serial.print(F("Foreign:")); Serial.println(foreignIgnored);
-  Serial.println(F("--------------\n"));
+  Serial.println(F("╟───────────────────────────────╢"));
+  Serial.print(F("║ Weak Ignored: "));
+  Serial.print(weakSignalIgnored);
+  Serial.println(F("             ║"));
+  Serial.print(F("║ Foreign Ignored: "));
+  Serial.print(foreignIgnored);
+  Serial.println(F("          ║"));
+  Serial.println(F("╚═══════════════════════════════╝\n"));
 }
