@@ -154,12 +154,11 @@ void setup() {
 // LOOP
 // ============================================
 void loop() {
+  listenForPackets();
   unsigned long now = millis();
   unsigned long beaconInterval = IS_SINK_NODE ? SINK_BEACON_INTERVAL : BEACON_INTERVAL;
 
-  listenForPackets();
-
-  if (!IS_SINK_NODE && bestNeighbor != 255 && (now - lastParentBeaconTime > ROUTE_TIMEOUT)) {
+  if (!IS_SINK_NODE && bestNeighbor != 255 && lastParentBeaconTime != 0 && (now - lastParentBeaconTime > ROUTE_TIMEOUT)) {
     Serial.print(F("[ROUTE LOST] Parent N"));
     Serial.print(bestNeighbor);
     Serial.println(F(" timed out, resetting route"));
@@ -167,6 +166,7 @@ void loop() {
     myDistance = 255;
     bestNeighborRSSI = -200;
     routeEstablishedTime = 0;
+    lastParentBeaconTime = 0;
   }
 
   if (now - lastBeacon > beaconInterval) {
@@ -316,6 +316,7 @@ void listenForPackets() {
           myDistance = 255;
           bestNeighborRSSI = -200;
           routeEstablishedTime = 0;
+          lastParentBeaconTime = 0;
         }
         return;
       }
