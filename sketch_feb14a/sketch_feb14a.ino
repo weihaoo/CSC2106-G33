@@ -13,13 +13,13 @@
 // ============================================
 // CHANGE THESE FOR EACH NODE!
 // ============================================
-#define MY_NODE_ID      1        // Node 1, 2, 3, 4, or 5
+#define MY_NODE_ID      2        // Node 1, 2, 3, 4, or 5
 #define IS_SINK_NODE    false    // true for sink, false for regular
 
 // ============================================
 // CHANGE THIS TO YOUR UNIQUE NETWORK ID!
 // ============================================
-#define MY_NETWORK_ID   0xAB    // Change to 0x12, 0x34, 0x99, anything!
+#define MY_NETWORK_ID   0x67    // Change to 0x12, 0x34, 0x99, anything!
                                  // Same for ALL your nodes!
 
 // ============================================
