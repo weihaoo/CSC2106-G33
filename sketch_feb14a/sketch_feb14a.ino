@@ -4,7 +4,7 @@
 // ============================================
 // CONFIGURATION
 // ============================================
-#define MY_NODE_ID 5        // CHANGE: 1, 2, 45, 89
+#define MY_NODE_ID 2        // CHANGE: 1, 2, 45, 89
 #define IS_SINK_NODE false   // true for sink, false for others
 #define MY_NETWORK_ID 0x67  // Same for ALL your nodes
 
@@ -20,14 +20,14 @@
 // ============================================
 #define BEACON_INTERVAL 8000
 #define SINK_BEACON_INTERVAL 4000
-#define DATA_INTERVAL 25000
-#define ROUTE_STABLE_TIME 30000
+#define DATA_INTERVAL 5000
+#define ROUTE_STABLE_TIME 3000
 #define ROUTE_TIMEOUT 30000
 
 // ============================================
 // RSSI Thresholds
 // ============================================
-#define RSSI_MIN_THRESHOLD -125  // Allow weaker tunnel links during route discovery
+#define RSSI_MIN_THRESHOLD -140  // Allow weaker tunnel links during route discovery
 #define BROADCAST_ADDR 0xFF
 #define MAX_DATA_HOPS 8
 #define DEDUP_CACHE_SIZE 20
@@ -115,7 +115,7 @@ void setup() {
       ;
   }
 
-  LoRa.setSpreadingFactor(7);
+  LoRa.setSpreadingFactor(10);
   LoRa.setSignalBandwidth(125E3);
   LoRa.setSyncWord(0x12);
   if (ENABLE_LORA_CRC) {
