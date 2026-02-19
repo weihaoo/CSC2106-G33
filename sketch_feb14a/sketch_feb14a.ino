@@ -4,7 +4,7 @@
 // ============================================
 // CONFIGURATION
 // ============================================
-#define MY_NODE_ID 2        // CHANGE: 1, 2, 45, 89
+#define MY_NODE_ID 22        // CHANGE: 1, 2, 45, 89
 #define IS_SINK_NODE false   // true for sink, false for others
 #define MY_NETWORK_ID 0x67  // Same for ALL your nodes
 
