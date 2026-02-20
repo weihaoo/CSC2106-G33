@@ -591,7 +591,9 @@ Write and validate the `BridgeAggV1` codec **before writing any edge firmware**.
 
 ## WisGate + TTN Setup and Configuration
 
-> Reference: Professor's lab guide — [`SETTINGUPTTN.md`](file:///c:/Users/wh/Desktop/CSC2106-G33/SETTINGUPTTN.md)
+> Reference: Professor's lab guide — [`SETTINGUPTTN.md`](SETTINGUPTTN.md)
+>
+> **Scope note:** In this project, LoRaWAN setup applies to **edge bridge ESP32 nodes only**. Sensor and relay Maker UNO nodes use raw LoRa mesh (Arduino-LoRa) and must not run LMIC.
 
 ### Step 1 — WisGate Hardware Setup
 
@@ -623,6 +625,7 @@ Two access methods (use whichever is available):
 2. Set **Work mode** to `Packet forwarder`.
 3. Set **Server URL** to `as1.cloud.thethings.network` (Singapore AS1 cluster).
    - ⚠️ Professor's guide uses `au1` (Australia). Our project uses **AS923 Singapore → `as1`**.
+   - ⚠️ Treat all `au1` / `AU915` references in legacy lab material as not applicable for this project.
 4. Note the **Gateway EUI** from the WisGate (also printed on the bottom label). You'll need this for TTN registration.
 
 ### Step 5 — TTN Account and Gateway Registration
@@ -654,12 +657,41 @@ Repeat for **both** edge bridges (`edge-bridge-01` and `edge-bridge-02`):
    - **Additional LoRaWAN class capabilities:** `None (Class A only)`
 3. Set provisioning:
    - **End Device ID:** `edge-bridge-01` (then repeat with `edge-bridge-02`)
-   - **JoinEUI (AppEUI):** `00 00 00 00 00 00 00 00` (or auto-generate)
+   - **JoinEUI (AppEUI in older docs):** `00 00 00 00 00 00 00 00`
    - **DevEUI:** Auto-generate (each bridge gets a unique DevEUI)
    - **AppKey:** Auto-generate (each bridge gets a unique AppKey)
 4. **Record the DevEUI, JoinEUI, and AppKey for each bridge.** These go into each bridge's `edge_node/config.h`.
    - ⚠️ **Byte order matters:** DevEUI and JoinEUI must be stored in **LSB** order in firmware. AppKey in **MSB** order. Use [Mobilefish EUI converter](https://www.mobilefish.com/download/lora/eui_key_converter.html) to convert.
+   - Example DevEUI conversion: TTN shows `70 B3 D5 7E D0 05 A1 2B` → firmware array (LSB) `{ 0x2B, 0xA1, 0x05, 0xD0, 0x7E, 0xD5, 0xB3, 0x70 }`.
 5. Click **Register end device**. Repeat for the second bridge.
+
+### Step 7A — LMIC Region + Pinmap (Edge Bridges Only)
+
+1. Edit MCCI LMIC `lmic_project_config.h` and ensure AS923 is selected:
+   - Comment out `#define CFG_us915 1`
+   - Comment out `#define CFG_au915 1`
+   - Uncomment `#define CFG_as923 1`
+2. In `edge_node/config.h`, define a complete LMIC pin map for **Radio B** (LoRaWAN radio), including NSS, RST, and DIO lines.
+3. Minimum required fields:
+
+```cpp
+// Example template - replace placeholders with your actual wiring.
+#define RADIO_B_NSS   15
+#define RADIO_B_RST   <SET_ACTUAL_PIN>
+#define RADIO_B_DIO0  <SET_ACTUAL_PIN>
+#define RADIO_B_DIO1  <SET_ACTUAL_PIN_OR_LMIC_UNUSED_PIN>
+#define RADIO_B_DIO2  LMIC_UNUSED_PIN
+
+const lmic_pinmap lmic_pins = {
+  .nss = RADIO_B_NSS,
+  .rxtx = LMIC_UNUSED_PIN,
+  .rst = RADIO_B_RST,
+  .dio = { RADIO_B_DIO0, RADIO_B_DIO1, RADIO_B_DIO2 },
+};
+```
+
+4. Keep SPI assignment aligned with this plan: Radio B on HSPI (`SCK=14`, `MISO=12`, `MOSI=13`, `CS=15`).
+5. Do not apply this LMIC setup to sensor/relay Maker UNO nodes.
 
 ### Step 8 — Deploy Payload Formatter
 

@@ -1,5 +1,10 @@
 # LoRaWAN Lab
 
+> Project override for CSC2106-G33: use **Singapore AS923** settings only.
+> - TTN cluster/server: `as1.cloud.thethings.network`
+> - Frequency plan: `Asia 920-923 MHz (AS923 Group 1)`
+> - LMIC region: `CFG_as923`
+
 ## Objectives
 -	To understand the core components in a LoRaWAN IoT solution.
 -	To understand the process in setting up a fully LoRaWAN-compliant IoT solution, using Cytron LoRa-RFM Shield + Cytron UNO as an end-device, and RAK WisGate Edge Lite 2 as gateway.
@@ -107,7 +112,7 @@ Select DHCP Client in the Mode field. Enter or click “Scan” to choose your E
 **2.3 Setup Gateway with TTN Credentials**
 
 -	Select Work mode as “Packet forwarder”.
--	Enter Server URL as “au1.cloud.thethings.network”.
+-	Enter Server URL as “as1.cloud.thethings.network”.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/dae28949-6f4d-4952-8603-0fd4a73bd18d)
 <br />*Figure 8: Wisgate – Packet Forwarder Mode*
@@ -138,7 +143,7 @@ Click Console.
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/4f49e6af-6e76-4ef5-b483-0c8b2d9e13a5)
 <br />*Figure 12: TheThingsNetwork - Console*
 
-Select “au1” for the region.
+Select “as1” for the region.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/625d2e0d-d58f-4fc3-8cb2-2fde0fb7700d)
 <br />*Figure 13: TheThingsNetwork - Network Cluster*
@@ -160,7 +165,7 @@ Verify the registered gateway EUI with the EUI on bottom label of the physical g
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/638a48f8-9851-4e6d-8738-7010607ad685)
 <br />*Figure 16: TheThingsNetwork – Gateway ID*
 
-Frequency Plan: “AU_915_928_FSB_2”.
+Frequency Plan: “Asia 920-923 MHz (AS923 Group 1)”.
 May selected a different frequency plan via “General Settings”.
 
 **NOTE**: Frequency plan selection is dependent on the operating frequency of the LoRaWAN gateway.
@@ -188,7 +193,7 @@ On the Application tab, Click “Register end device”.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/e0fc3d17-8023-4c03-88e0-5e3130d5baeb)
 
--	Frequency Plan: “Australia 915-928 MHz, FSB 2”
+-	Frequency Plan: “Asia 920-923 MHz (AS923 Group 1)”
 -	LoRaWan Version: “LoRaWan Specification 1.0.2”
 -	Regional Parameters Version: “RP001 Regional Parameters 1.0.2 revision B”
 -	Activation mode: Over The Air Activation (OTAA)
@@ -200,11 +205,11 @@ On the Application tab, Click “Register end device”.
 <br />*Figure 20: TheThingsNetwork – Register End Device 1*
 
 -	Choose and enter End Device ID.
--	Join EUI: 00 00 00 00 00 00 00 00
--	Application EUI: Auto-generate.
+-	Join EUI (AppEUI in older TTN docs): 00 00 00 00 00 00 00 00
+-	DevEUI: Auto-generate.
 -	App Key: Auto-generate.
 
-Take note of the Application/Join EUI, Device EUI and the App Key. These keys are needed later to set up the LoRa-RFM + UNO.
+Take note of the JoinEUI, DevEUI and AppKey. These keys are needed later to set up the end device.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/ef026426-3284-4048-96b4-bb034a6537b7)
 <br />*Figure 21: TheThingsNetwork – Register End Device 2*
@@ -215,6 +220,10 @@ Choose and enter a Device ID and an eight-byte Device EUI.
 <br />*Figure 22: TheThingsNetwork – Register End Device 3*
 
 ###	6. End Device Configuration 
+
+**IMPORTANT (CSC2106-G33 scope):**
+- Section 6 applies to **LoRaWAN end devices only** (edge bridge ESP32 in this project).
+- Do **not** apply LMIC setup here to sensor/relay Maker UNO mesh nodes. They use raw LoRa (Arduino-LoRa), not LoRaWAN.
 
 **6.1 LoRaWAN Library Install**
 
@@ -229,17 +238,23 @@ Choose and enter a Device ID and an eight-byte Device EUI.
 **6.1.1 Configure the MCCI LoRaWAN LMIC Library**
 - Edit file lmic_project_config.h.
 - This file can be found at: ".../libraries/MCCI_LoRaWAN_LMIC_library/project_config"
-- Comment "#define CFG_us915 1", uncomment "#define CFG_au915 1"
+- Comment "#define CFG_us915 1"
+- Comment "#define CFG_au915 1"
+- Uncomment "#define CFG_as923 1"
   
 ![project_config](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108822683/c3148703-6372-4ebf-969c-f5b4f2455455)
 
 **6.2 End Device LoRaWAN Configuration**
 
-The LoRa-RFM transceiver module does not have a built-in DevEUI or AppEUI. In such a case you should let the TTN console generate the required DevEUI or AppEUI. Here below is an example of generated AppEUI, DevEUI, and AppKey in the TTN console.
+The LoRa-RFM transceiver module does not have a built-in DevEUI or JoinEUI. In such a case you should let the TTN console generate the required DevEUI and use your chosen JoinEUI. Here below is an example of generated JoinEUI, DevEUI, and AppKey in the TTN console.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/22803439-5888-47ad-a802-d7a52b4c664f)
 
-**NOTE**: AppEUI, DevEUI, and AppKey are used in the Arduino sketch. In this Arduino sketch, the DevEUI or AppEUI must be converted to an array of 16 bytes in LSB order.  The AppKey must be converted to an array of 32 bytes in MSB order. I have found an online tool that converts these values to a bytes array in its correct order (LSB/MSB). Kindly use this online tool to prevent any negligence.
+**NOTE**: JoinEUI (AppEUI in older docs), DevEUI, and AppKey are used in the Arduino sketch. In this Arduino sketch, DevEUI and JoinEUI must be converted to an array of **8 bytes** in LSB order (16 hex chars). AppKey must be converted to an array of **16 bytes** in MSB order (32 hex chars). I have found an online tool that converts these values to a bytes array in its correct order (LSB/MSB). Kindly use this online tool to prevent any negligence.
+
+Example DevEUI conversion:
+- TTN display (MSB): `70 B3 D5 7E D0 05 A1 2B`
+- Firmware array (LSB): `{ 0x2B, 0xA1, 0x05, 0xD0, 0x7E, 0xD5, 0xB3, 0x70 }`
 
 https://www.mobilefish.com/download/lora/eui_key_converter.html
 
@@ -249,9 +264,9 @@ Open Arduino IDE. Copy and paste the code from link below. You need to do some a
 
 [ttn_otaa_helloworld.ino](ttn_otaa_helloworld.ino)
 
-From the online tool, copy DevEUI, AppEUI, and AppKey that you had converted and paste them into the sketch.
+From the online tool, copy DevEUI, JoinEUI, and AppKey that you had converted and paste them into the sketch.
 
-**NOTE**: There are other end devices added for the gateway, may refer to the list for their DevEUI, AppEUI, and AppKey. [End Device List](https://docs.google.com/spreadsheets/d/162q66cY5dvrjUPV9j6DFyl1rWE2vFnVp/edit?usp=sharing&ouid=108366451185223435208&rtpof=true&sd=true)
+**NOTE**: There are other end devices added for the gateway, may refer to the list for their DevEUI, JoinEUI/AppEUI, and AppKey. [End Device List](https://docs.google.com/spreadsheets/d/162q66cY5dvrjUPV9j6DFyl1rWE2vFnVp/edit?usp=sharing&ouid=108366451185223435208&rtpof=true&sd=true)
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/48ae9c5a-6a1b-4b06-8f3e-7e1e1044939f)
 
