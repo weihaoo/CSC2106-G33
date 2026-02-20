@@ -560,7 +560,7 @@ RETRIES_BY_STATE[3]  = {3, 2, 1}      // GREEN, YELLOW, RED
 
 1. Add pre-TX jitter: random delay `0..2000 ms` on originated telemetry packets.
 2. Perform RSSI-based channel sensing before non-ACK transmissions:
-   - sample radio RSSI in RX/standby mode and compare with `CHANNEL_BUSY_RSSI_DBM` (default `-90 dBm`).
+   - sample radio RSSI in RX/standby mode and compare with `CHANNEL_BUSY_RSSI_DBM` (default `-90 dBm`). Do not use `LoRa.rssi()` as it returns the last packet RSSI. Instead, implement a `read_channel_rssi()` helper in `shared/mesh_protocol.h` to put the radio in RX mode, read register `0x1A` (RegRssiValue), and apply the HF port formula (-157 + RegRssiValue).
    - if channel busy, random backoff `50..200 ms`, retry sensing up to 2 times.
    - if still busy after final attempt, transmit after final backoff (no additional retry loop).
 3. Optional enhancement: if hardware exposes CAD-complete IRQ wiring and firmware support, CAD may be enabled in addition to RSSI sensing.
@@ -705,9 +705,13 @@ static inline uint8_t rssi_to_norm(int16_t rssi_dbm) {
 
 ### Hardware Model
 - Radio A: SX1276, mesh transceiver, 923 MHz, Arduino-LoRa. **Connected to VSPI (SCK=18, MISO=19, MOSI=23, CS=5).**
+  - **Explicit binding required:** Create `SPIClass vspi(VSPI); vspi.begin(18, 19, 23, 5); LoRa.setSPI(vspi);` before `LoRa.begin()`.
+  - **Pin mapping:** `CS=5`, `RST=25`, `DIO0=32`.
 - Radio B: SX1276, LoRaWAN transceiver, LMIC, AS923 OTAA. **Connected to HSPI (SCK=14, MISO=12, MOSI=13, CS=15).**
+  - **Explicit binding required:** Create `SPIClass hspi(HSPI); hspi.begin(14, 12, 13, 15);` before `os_init()`. Pass this SPI instance to LMIC's HAL (method depends on LMIC version, check `hal.cpp` for SPI binding API).
+  - **Pin mapping:** `CS=15`, `RST=27`, `DIO0=26`, `DIO1=33`.
 - MCU: ESP32, dual-core FreeRTOS.
-- **Separate SPI buses** ensure no bus contention between Mesh and LoRaWAN stacks.
+- **Separate SPI buses and distinct RST/DIO pins** ensure no bus contention or hardware interrupts conflicts between Mesh and LoRaWAN stacks.
 
 ### Firmware Structure
 
@@ -720,7 +724,7 @@ static inline uint8_t rssi_to_norm(int16_t rssi_dbm) {
 2. **`lorawan_task` (Core 1):**
    - OTAA join with exponential backoff.
    - On join success: `LMIC_setAdrMode(0)` for fixed-airtime operation (TTN fair-use profile).
-   - Dequeue aggregated telemetry frames.
+   - Dequeue aggregated telemetry frames. Use a non-blocking poll `xQueueReceive(uplink_q, &frame, 0)` with a short yield `vTaskDelay(pdMS_TO_TICKS(2))` in the task tight loop to ensure `os_runloop_once()` runs frequently to service LMIC timing windows. Do not use `portMAX_DELAY` as it will block LMIC.
    - Optional TTN airtime guard (enabled in TTN fair-use profile):
      - Track `daily_airtime_ms` and `airtime_window_start_s` (uptime-based 86400s window).
      - Estimate airtime before each uplink from current SF + payload bytes.
@@ -890,7 +894,7 @@ const lmic_pinmap lmic_pins = {
 1. In TTN Console, select the application → **Integrations → MQTT**.
 2. Note the connection details:
    - **Server:** `as1.cloud.thethings.network`
-   - **Port:** `1883` (or `8883` for TLS)
+   - **Port:** `1883` (Use port 1883. TLS (8883) requires ussl wrapping and is out of scope for this implementation.)
    - **Username:** `{app-id}@ttn`
    - **Password:** Generate an API key with "Read application traffic" rights
 3. **Topic for Pico W subscription:** `v3/{app-id}@ttn/devices/+/up`
@@ -959,6 +963,7 @@ Serve a single-page HTML dashboard at `http://{pico-ip}/`. Refresh every 10 seco
 - All state kept in memory (no file system required for MVP).
 
 **Work package (`dashboard/`):**
+- **Note:** Install Phew! by copying the `phew/` folder from the Pimoroni GitHub release to the Pico W filesystem before running `main.py`.
 - `main.py` — boot, WiFi connect, cooperative scheduler loop (`mqtt_check_once()` + `http_poll_once()`).
 - `dashboard.py` — HTML template string with placeholder substitution.
 - `state.py` — in-memory node state dict with update and query functions.

@@ -38,10 +38,10 @@
 #define LORA_RST        9
 #define LORA_DIO0       2
 
-// For ESP32 TTGO/Heltec (uncomment if using ESP32)
-// #define LORA_SS      18
-// #define LORA_RST     14
-// #define LORA_DIO0    26
+// For ESP32 (Radio A on VSPI) - Using conflict-free pins (uncomment if using ESP32)
+// #define LORA_SS      5
+// #define LORA_RST     25
+// #define LORA_DIO0    32
 
 // ════════════════════════════════════════════════════════════════════════════
 // GLOBAL STATE
