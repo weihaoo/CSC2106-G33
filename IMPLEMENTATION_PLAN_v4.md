@@ -217,9 +217,9 @@ Assume 3 sensor nodes, 120s periodic interval, load split across **2 edge bridge
 
 Even if all 3 sensors route through a single bridge (failover scenario), the load is 2,160 / 7 ≈ 309 uplinks × 56ms ≈ **~17s/day** — still within budget.
 
-**Strategy: Aggregation (Option A).** Each edge bridge buffers N sensor readings and packs them into one LoRaWAN uplink. Flush on 120s timer or 7 records buffered, whichever comes first.
+**Strategy: Aggregation.** Each edge bridge buffers N sensor readings and packs them into one LoRaWAN uplink. Flush on 120s timer or 7 records buffered, whichever comes first.
 
-**Decision: Option A (aggregation) with 2 edge bridges.** Both registered as separate LoRaWAN OTAA end devices on TTN. Load is well within 30s/day per device even under failover.
+**Decision: Aggregation with 2 edge bridges.** Both registered as separate LoRaWAN OTAA end devices on TTN. Load is well within 30s/day per device even under failover.
 
 ---
 
