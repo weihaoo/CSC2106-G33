@@ -241,6 +241,33 @@ Even if all 3 sensors route through a single bridge (failover scenario), the loa
 
 ### 1. `MeshHeader` (mandatory on all mesh packets)
 
+**LoRa PHY frame vs mesh protocol — what goes where:**
+
+```
+LoRa PHY frame (transmitted over the air by SX1276):
+┌──────────┬──────┬──────────┬──────────────────────────────────────┬─────┐
+│ Preamble │ PHDR │ PHDR_CRC │            PHYPayload                │ CRC │
+│  (auto)  │(auto)│  (auto)  │       ◄── YOUR BYTES GO HERE ──►     │(auto)│
+└──────────┴──────┴──────────┴──────────────────────────────────────┴─────┘
+                                          │
+                              ┌───────────┘
+                              ▼
+              ┌───────────────────────┬──────────────────────┐
+              │   MeshHeader (10B)    │   Payload (N bytes)   │
+              │  bytes 0–9            │   bytes 10–N          │
+              │  (relay reads this)   │   (relay copies       │
+              │                       │    blindly)            │
+              └───────────────────────┴──────────────────────┘
+                                              │
+                              ┌───────────────┘
+                              ▼
+                  Data packet:  SensorPayload (7B for DHT22)
+                  Beacon:       BeaconPayloadV1 (4B)
+
+  Preamble, PHDR, PHDR_CRC, CRC → handled by SX1276 hardware (Arduino-LoRa).
+  PHYPayload → written by firmware via LoRa.write(). This is MeshHeader + payload.
+```
+
 **Concrete byte layout (10 bytes total):**
 
 | Offset | Field        | Size   | Notes |
