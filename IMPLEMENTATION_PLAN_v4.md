@@ -4,7 +4,7 @@
 >
 > **Revision notes (v3):** Adds full PDR Measurement Methodology section covering: definition and rationale, ground truth logging on sender and TTN sides, PDR/integrity/latency computation scripts, three structured stress test scenarios (baseline, burst load, failure/recovery), and explicit pass/fail thresholds for each metric.
 >
-> **Revision notes (v4):** Resolves all previously missing definitions: `SensorPayload` full byte layout for MQ-135 + DS18B20, `BridgeAggV1` concrete byte layout with `sensor_type_hint` per record, alert threshold EEPROM placeholder with field calibration instructions, MQ-135 60s warm-up guard, EEPROM table corrected to include WDT reset counter at 0x14 and alert threshold at 0x1A–0x1B, missing Test Cases section heading restored, power budget section added (battery + mains split), Flask dashboard implementation spec added, PDR methodology updated to lab-only serial logging, hardware spec updated to confirmed sensors (MQ-135 + DS18B20), library table corrected (DHT removed). **Architecture change:** dual Pico W replaced with single Pico W acting as application server only — WisGate forwards to TTN (network server), TTN pushes via MQTT/webhook to Pico W Flask application.
+> **Revision notes (v4):** Resolves all previously missing definitions: `SensorPayload` full byte layout for MQ-135 + DS18B20, `BridgeAggV1` concrete byte layout with `sensor_type_hint` per record, alert threshold EEPROM placeholder with field calibration instructions, MQ-135 60s warm-up guard, EEPROM table corrected to include WDT reset counter at 0x14 and alert threshold at 0x1A–0x1B, missing Test Cases section heading restored, power budget section added (battery + mains split), dashboard implementation spec updated for Pico W-compatible HTTP server, PDR methodology updated to lab-only serial logging, hardware spec updated to confirmed sensors (MQ-135 + DS18B20), library table corrected (DHT removed). **Architecture change:** dual Pico W replaced with single Pico W acting as application server only — WisGate forwards to TTN (network server), TTN pushes via MQTT/webhook to Pico W application server.
 >
 > **Revision notes (v5):** Sensor simplified to DHT22 only (MQ-135 gas sensor and DS18B20 removed). Alert uplink path (`BridgeUplinkV1`) removed — all data is telemetry-only, sent via aggregated `BridgeAggV1`. Sensor interval changed from 15s to 120s. Network sized to **6 mesh nodes: 3 sensor, 1 relay, 2 edge bridges** (both edge bridges are LoRaWAN end devices registered on TTN). All nodes are mains-powered (USB/5V supply) — battery power budget section removed. SensorPayload redesigned for DHT22 (temperature + humidity). EEPROM alert threshold fields removed. Payload-agnostic relay design emphasised as the core architectural goal.
 
@@ -27,7 +27,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 1. Three sensor nodes read DHT22 (temperature + humidity) and route upstream through mesh parents.
 2. One relay node forwards packets **opaquely** — it never reads sensor payloads. This is the core payload-agnostic design.
 3. Two edge bridge nodes aggregate mesh telemetry and uplink to TTN via LoRaWAN (AS923). Both are registered as separate LoRaWAN end devices.
-4. TTN acts as the LoRaWAN network server. A single Pico W runs the Flask application server, consuming data from TTN via MQTT.
+4. TTN acts as the LoRaWAN network server. A single Pico W runs the application server (Phew! + MicroPython), consuming data from TTN via MQTT.
 5. All nodes are mains-powered (5V USB supply). No battery power budget constraints.
 6. The final deliverable is successful real end-to-end uplink (not simulated), plus measured latency/PDR/throughput and a minimal monitoring dashboard.
 
@@ -82,7 +82,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
                                          │ MQTT
                                          ▼
                    ┌─────────────────────────────────────────────┐
-                   │        Pico W — Flask App Server             │
+                   │       Pico W — Phew! App Server              │
                    │        Dashboard + telemetry display         │
                    └─────────────────────────────────────────────┘
 ```
@@ -115,7 +115,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 **Role of each component:**
 - **WisGate:** LoRaWAN gateway only. Forwards uplink frames to TTN. No application logic.
 - **TTN:** Network server. Handles OTAA join, MIC verification, frame counter, payload decoding via formatter. Pushes decoded data to Pico W.
-- **Pico W:** Application server only. Receives TTN data via MQTT subscription or webhook. Runs Flask dashboard. No LoRaWAN stack.
+- **Pico W:** Application server only. Receives TTN data via MQTT subscription or webhook. Runs a Phew!-based dashboard. No LoRaWAN stack.
 
 ---
 
@@ -159,7 +159,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 
 | Component | Model | Role |
 |-----------|-------|------|
-| **Pico W** | Raspberry Pi Pico W | Flask application server. Subscribes to TTN MQTT or receives TTN webhook. Serves dashboard. No LoRaWAN stack. |
+| **Pico W** | Raspberry Pi Pico W | Application server (MicroPython + Phew!). Subscribes to TTN MQTT or receives TTN webhook. Serves dashboard. No LoRaWAN stack. |
 
 ---
 
@@ -190,7 +190,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 |---------|---------|
 | **MicroPython** | Runtime |
 | **umqtt.simple** | MQTT client to subscribe to TTN application MQTT broker |
-| **Flask (via MicroPython)** or **Phew!** | Lightweight HTTP server for dashboard |
+| **Phew!** (or equivalent MicroPython non-blocking HTTP server) | Lightweight HTTP server for dashboard |
 
 ---
 
@@ -198,7 +198,7 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 
 This analysis must be resolved before committing to the bridged uplink architecture. TTN fair use policy allows **30 seconds of airtime per LoRaWAN device per day**. Each edge bridge node is a single LoRaWAN device.
 
-### Airtime per frame at each SF (20-byte LoRaWAN payload, BW 125 kHz, CR 4/5)
+### Airtime per frame at each SF (reference only: 20-byte LoRaWAN payload, BW 125 kHz, CR 4/5)
 
 | SF  | Approx. airtime/frame | Max frames/day (30s budget) |
 |-----|-----------------------|-----------------------------|
@@ -207,19 +207,47 @@ This analysis must be resolved before committing to the bridged uplink architect
 | SF9 | ~185 ms               | ~162                        |
 | SF10| ~370 ms               | ~81                         |
 
-### Budget calculation example
+The table above is **not** the actual `BridgeAggV1` airtime; it is a 20-byte reference point only.
 
-Assume 3 sensor nodes, 120s periodic interval, load split across **2 edge bridges** (typical: 2 sensors on bridge 1 via relay, 1 sensor on bridge 2 direct):
+### Actual payload sizing for `BridgeAggV1`
 
-- **Bridge 1 (busier):** 2 sensors × 720 packets/day = 1,440. With aggregation (7 per uplink): 1,440 / 7 ≈ 206 uplinks × 56ms ≈ **~12s/day**
-- **Bridge 2:** 1 sensor × 720 packets/day = 720. With aggregation: 720 / 7 ≈ 103 uplinks × 56ms ≈ **~6s/day**
-- Combined: ~18s/day across both bridges — within 30s budget per device
+For `record_count = N`:
+- FRMPayload bytes = `3 + (14 × N)`
+- LoRaWAN PHYPayload bytes used for airtime approximation = `FRMPayload + 13`
+  (MHDR 1 + FHDR 7 + FPort 1 + MIC 4)
 
-Even if all 3 sensors route through a single bridge (failover scenario), the load is 2,160 / 7 ≈ 309 uplinks × 56ms ≈ **~17s/day** — still within budget.
+At SF7/BW125/CR4/5:
+- `N=2`: FRMPayload 31B → PHYPayload ~44B → airtime ~92.4 ms
+- `N=4`: FRMPayload 59B → PHYPayload ~72B → airtime ~133.4 ms
+- `N=6`: FRMPayload 87B → PHYPayload ~100B → airtime ~174.3 ms
+- `N=7`: FRMPayload 101B → PHYPayload ~114B → airtime ~194.8 ms
 
-**Strategy: Aggregation.** Each edge bridge buffers N sensor readings and packs them into one LoRaWAN uplink. Flush on 120s timer or 7 records buffered, whichever comes first.
+### Budget calculation example (current low-latency defaults)
 
-**Decision: Aggregation with 2 edge bridges.** Both registered as separate LoRaWAN OTAA end devices on TTN. Load is well within 30s/day per device even under failover.
+Assume:
+- Sensor periodic interval = 120s
+- Flush interval = 240s or 7 records
+- Load split: bridge 1 gets ~2 sensors, bridge 2 gets ~1 sensor
+
+In steady state, the **time trigger dominates**:
+- **Bridge 1:** ~4 records/uplink, 360 uplinks/day → 360 × 133.4 ms ≈ **~48.0 s/day**
+- **Bridge 2:** ~2 records/uplink, 360 uplinks/day → 360 × 92.4 ms ≈ **~33.3 s/day**
+
+Result: both bridges exceed TTN 30s/day fair use under current low-latency defaults.
+
+### Operating profiles
+
+1. **Low-latency lab profile (default in this plan):**
+   - `sensor_interval_s = 120`
+   - `flush_interval_s = 240`
+   - Suitable for latency/convergence experiments, but **not TTN fair-use compliant** for 24h continuous operation.
+2. **TTN fair-use profile (optional):**
+   - `sensor_interval_s = 180`
+   - `flush_interval_s = 450`
+   - Expected busy bridge at SF7: ~5 records/uplink, 192 uplinks/day → 192 × 153.9 ms ≈ **~29.5 s/day**
+   - Requirement: keep edge uplink at SF7; prolonged SF9 operation will exceed 30s/day.
+
+**Decision:** Keep the low-latency profile for bench performance experiments. Use TTN fair-use profile when running long-duration tests on public TTN.
 
 ---
 
@@ -229,11 +257,11 @@ Even if all 3 sensors route through a single bridge (failover scenario), the loa
 2. Sensor adds `MeshHeader` and sends `PKT_TYPE_DATA` to current parent.
 3. Relay receives frame, validates CRC, deduplicates, ACKs previous hop, decrements TTL, forwards payload **unchanged** to its parent.
 4. Edge node receives final mesh frame, ACKs previous hop. Stores in aggregation buffer.
-5. On flush trigger (120s elapsed or 7 records buffered): edge packs `BridgeAggV1` and transmits LoRaWAN uplink via OTAA session to WisGate.
+5. On flush trigger (240s elapsed or 7 records buffered): edge packs `BridgeAggV1` and transmits LoRaWAN uplink via OTAA session to WisGate.
 6. WisGate forwards raw frame to TTN network server.
 7. TTN decodes payload using `decoder.js` formatter and exposes structured data.
 8. TTN pushes decoded data to Pico W via MQTT broker or webhook.
-9. Pico W Flask application serves dashboard and telemetry display.
+9. Pico W application server serves dashboard and telemetry display.
 
 ---
 
@@ -321,7 +349,7 @@ Used when the edge bridge flushes its aggregation buffer. All sensor data is DHT
 | 1      | bridge_id      | 1 byte | Edge node ID |
 | 2      | record_count   | 1 byte | Number of records that follow (max 7) |
 
-**Per-record layout (13 bytes each):**
+**Per-record layout (14 bytes each):**
 
 | Offset | Field            | Size    | Notes |
 |--------|-----------------|---------|-------|
@@ -333,7 +361,7 @@ Used when the edge bridge flushes its aggregation buffer. All sensor data is DHT
 | 6      | opaque_len       | 1 byte  | Byte length of sensor payload (always 7 for DHT22) |
 | 7–13   | opaque_payload   | 7 bytes | DHT22 SensorPayload bytes |
 
-**Maximum aggregate size at SF9:** 3 + (7 × 13) = 94 bytes. SF9 max payload = 115 bytes. Safe. Maximum record_count = 7 at SF9, 8 at SF7/SF8.
+**Maximum aggregate size at SF9:** 3 + (7 × 14) = 101 bytes. SF9 max payload = 115 bytes. Safe. Maximum record_count = 7 at SF9, 8 at SF7/SF8.
 
 ### 4. `PacketUID`
 
@@ -360,17 +388,33 @@ Fields: `role`, `node_id`, `region`, `frequency`, `sf_default`, `sf_fallback`, `
 | TX retry buffer | 32 | One packet held for retry |
 | Uplink queue (relay only, 4 × 32B) | 128 | LoRa frame staging buffer |
 | BeaconPayloadV1 | 4 | Current outbound beacon payload |
-| Config struct | 24 | All runtime config fields |
+| Config struct | 25 | All runtime config fields (`flush_interval_s` is uint16) |
 | Score weights | 3 | Fast-access copy from EEPROM |
+| Congestion state | 1 | `CONGEST_GREEN/YELLOW/RED` |
+| ACK-fail bit window | 3 | Packed 20-attempt failure history |
+| ACK-fail running count | 1 | Fast `ack_fail_pct` update |
+| Effective retries cache | 1 | State-derived retries |
+| Channel-sense RSSI scratch | 1 | Last live channel RSSI sample |
 | LoRa library buffers (Arduino-LoRa) | ~100 | Measured; much lighter than LMIC |
 | Stack headroom | 300 | Conservative estimate |
-| **Total estimated** | **~737** | Leaves ~1300 bytes margin with Arduino-LoRa |
+| **Total estimated** | **~745** | Leaves ~1300 bytes margin with Arduino-LoRa |
 
 **Action items:**
 - Profile actual stack depth with a watermark canary before final firmware.
 - Dedup table uses 16-bit timestamps (seconds, rolls over in ~18 hours) to save 2 bytes/entry.
 - Neighbor table capped at 8 entries; evict by LRU (`last_seen_s`) if full.
 - Do not use dynamic memory allocation (malloc/free) anywhere in firmware.
+
+---
+
+## ATmega328P Flash Budget Gate (Mandatory)
+
+SRAM is not the only constraint on Maker UNO nodes. Relay firmware in particular can approach 32 KB flash limits once forwarding, scoring, logging, and congestion logic are enabled.
+
+1. Run `avr-size` on sensor and relay firmware after each major feature merge.
+2. Record `Program` size in build logs.
+3. Alert threshold: if program size exceeds **90%** of flash (~28.8 KB), freeze feature additions and reduce logging/debug code before continuing.
+4. Hard stop: do not ship if program size exceeds board flash limit after bootloader allowance.
 
 ---
 
@@ -395,12 +439,14 @@ Node IDs are **not** compile-time constants. Provisioning mechanism:
 | 0x04      | sf_default          | 1B   | Spreading factor 7–12 |
 | 0x05      | sf_fallback         | 1B   | Fallback SF on link degradation |
 | 0x06–0x08 | score_weights       | 3B   | [rank, rssi, queue], sum to 100 |
-| 0x09      | flush_interval_s    | 1B   | Edge aggregation flush interval |
-| 0x0A–0x0F | reserved            | 6B   | Do not use |
+| 0x09–0x0A | flush_interval_s    | 2B   | Edge aggregation flush interval in seconds, uint16 little-endian |
+| 0x0B–0x0F | reserved            | 5B   | Do not use |
 | 0x10–0x13 | overflow_drop_count | 4B   | Persistent queue overflow counter |
 | 0x14      | wdt_reset_count     | 1B   | Incremented on each WDT reboot |
 | 0x15–0x18 | crc_fail_count      | 4B   | Persistent CRC failure counter (relay nodes) |
 | 0x19–0x1B | reserved            | 3B   | |
+
+`flush_interval_s` uses 2 bytes specifically to support values >255 (for example TTN fair-use profile value 450s).
 
 ---
 
@@ -413,7 +459,8 @@ All node types must implement hardware watchdog. Non-negotiable for unattended u
 3. **Do NOT kick inside:** retry loops, blocking wait states, or sleep sequences.
 4. **On watchdog reset:** read reset cause register. If WDT reset, increment EEPROM[0x14] before normal boot. Log `WDT_RESET` on first serial output after boot.
 5. **ESP32 edge node:** FreeRTOS TWDT per task. Both `mesh_task` and `lorawan_task` register with TWDT. Timeout: 30 seconds.
-6. **Safe mode threshold:** If EEPROM[0x14] exceeds 5 in a 24-hour window, node enters safe mode (health alert only, no sensor reads) and waits for operator reset.
+6. **Safe mode threshold:** If EEPROM[0x14] exceeds 5 since last manual clear, node enters safe mode (health alert only, no sensor reads) and waits for operator reset.
+   - ATmega328P has no RTC in this design, so a true 24-hour rolling window is not enforced in firmware.
 
 ---
 
@@ -446,7 +493,8 @@ Parent timeout: `parent_timeout = 3 × (ACK_timeout × max_retries) + beacon_int
 2. If `link_quality` drops below threshold for 3 consecutive beacons → promote to SF9. Log `SF_FALLBACK`.
 3. If on SF9 and `link_quality` recovers for 5 consecutive beacons → return to SF7. Log `SF_RECOVER`.
 4. SF11/SF12 reserved for emergency rescue beacon only.
-5. ADR disabled on all mesh nodes. ADR applies only to the edge bridge's LoRaWAN uplink (handled by LMIC on Radio B).
+5. ADR disabled on all mesh nodes.
+6. Radio B (LoRaWAN uplink via LMIC): disable ADR for deterministic airtime budgeting. After OTAA join in `lorawan_task`, call `LMIC_setAdrMode(0)` and keep fixed DR/SF7 for TTN fair-use profile runs. Re-enable ADR only for explicit ADR experiments.
 
 | SF transition | RSSI threshold |
 |--------------|---------------|
@@ -468,6 +516,68 @@ When a relay or sensor loses its parent with no backup:
 
 ---
 
+## Congestion Control Policy (Decision-Complete)
+
+This policy is applied to **mesh nodes** (sensor + relay). It is designed to reduce collisions during burst traffic while staying within ATmega328P memory/timing limits.
+
+### Constants (shared)
+
+```c
+CONGEST_GREEN  = 0
+CONGEST_YELLOW = 1
+CONGEST_RED    = 2
+
+ACK_FAIL_WINDOW = 20          // attempts
+QUEUE_PCT_YELLOW = 60
+QUEUE_PCT_RED    = 80
+ACK_FAIL_YELLOW_PCT = 20
+ACK_FAIL_RED_PCT    = 40
+
+TX_JITTER_MIN_MS = 0
+TX_JITTER_MAX_MS = 2000
+SENSE_MAX_ATTEMPTS = 2
+SENSE_BACKOFF_MIN_MS = 50
+SENSE_BACKOFF_MAX_MS = 200
+CHANNEL_BUSY_RSSI_DBM = -90
+
+INTERVAL_MULT_X10[3] = {10, 15, 20}   // GREEN 1.0x, YELLOW 1.5x, RED 2.0x
+RETRIES_BY_STATE[3]  = {3, 2, 1}      // GREEN, YELLOW, RED
+```
+
+### State derivation
+
+1. Compute `ack_fail_pct` over last 20 TX attempts.
+2. Define `queue_pct` source per role:
+   - Sensor node: use selected parent's advertised `BeaconPayloadV1.queue_pct` (latest valid beacon).
+   - Relay node: use local TX queue occupancy percentage.
+3. Use `queue_pct` and `ack_fail_pct`:
+   - `RED` if `queue_pct >= 80` OR `ack_fail_pct >= 40`
+   - `YELLOW` if `queue_pct >= 60` OR `ack_fail_pct >= 20`
+   - `GREEN` otherwise
+4. Evaluate once per beacon period (10s) and log transitions (`CONGEST_GREEN`, `CONGEST_YELLOW`, `CONGEST_RED`).
+
+### TX discipline
+
+1. Add pre-TX jitter: random delay `0..2000 ms` on originated telemetry packets.
+2. Perform RSSI-based channel sensing before non-ACK transmissions:
+   - sample radio RSSI in RX/standby mode and compare with `CHANNEL_BUSY_RSSI_DBM` (default `-90 dBm`).
+   - if channel busy, random backoff `50..200 ms`, retry sensing up to 2 times.
+   - if still busy after final attempt, transmit after final backoff (no additional retry loop).
+3. Optional enhancement: if hardware exposes CAD-complete IRQ wiring and firmware support, CAD may be enabled in addition to RSSI sensing.
+4. Effective telemetry interval:
+   - `effective_interval_s = base_interval_s * INTERVAL_MULT_X10[state] / 10`
+5. Effective retries:
+   - `effective_retries = RETRIES_BY_STATE[state]`
+6. Beacon staggering (all mesh nodes):
+   - `beacon_offset_ms = (node_id % 6) * 1667`
+   - apply once at boot so 6 nodes spread across a 10s beacon window.
+
+### Feasibility note
+
+Worst-case sensing+backoff wait here is < 500 ms, well below 8s WDT timeout. No extra WDT kick points are required.
+
+---
+
 ## Sensor Node Implementation (How + Why)
 
 ### Responsibilities
@@ -480,32 +590,65 @@ When a relay or sensor loses its parent with no backup:
 
 1. **Sensor driver:**
    - **DHT22:** Use Adafruit DHT library. Read temperature and humidity each cycle. If read fails, set `status = 0x01` and skip transmission for that cycle. Compute `temp_c_x10 = (int)(temp_c * 10)` and `humidity_x10 = (int)(rh * 10)`.
+2. **Mesh radio pin init (mandatory before `LoRa.begin()`):**
+   - Set explicit shield pin mapping instead of relying on library defaults:
+     - `LoRa.setPins(MESH_SS_PIN, MESH_RST_PIN, MESH_DIO0_PIN);`
+   - Baseline Cytron Maker UNO + Cytron LoRa-RFM Shield profile:
+     - `MESH_SS_PIN=10`, `MESH_RST_PIN=9`, `MESH_DIO0_PIN=2`
+   - If your shield revision differs, update these constants from board silk-screen/wiring check before firmware testing.
 
-2. **Build `SensorPayload`** per byte layout in section 3. Pack as byte array — never as C struct (struct padding is compiler-dependent and will corrupt the decoder).
+3. **Build `SensorPayload`** per byte layout in section 3. Pack as byte array — never as C struct (struct padding is compiler-dependent and will corrupt the decoder).
 
-3. **Keep payload opaque** — relay never reads sensor bytes.
+4. **Keep payload opaque** — relay never reads sensor bytes.
 
-4. **Parent selection:**
+5. **Parent selection:**
    - Parse incoming `BeaconPayloadV1`.
-   - `score = w_rank × rank_score + w_rssi × rssi_norm + w_queue × (100 − queue_pct)`
+   - Use shared normalization helpers from `shared/mesh_protocol.h`:
+     - `MAX_RANK = 4`
+     - `rank_clamped = min(neighbor.rank, MAX_RANK)`
+     - `rank_score = ((MAX_RANK - rank_clamped) * 100) / MAX_RANK` (rank 0→100, rank 1→75, rank 2→50, rank 3→25, rank >=4→0)
+     - `rssi_norm = rssi_to_norm(rssi_dbm)`
+     - `rssi_to_norm()` must be defined in `shared/mesh_protocol.h`:
+
+```cpp
+static inline uint8_t clamp_u8(int v, int lo, int hi) {
+  if (v < lo) return (uint8_t)lo;
+  if (v > hi) return (uint8_t)hi;
+  return (uint8_t)v;
+}
+
+static inline uint8_t rssi_to_norm(int16_t rssi_dbm) {
+  long mapped = map((long)rssi_dbm, -120, -60, 0, 100);  // map() does not clamp
+  return clamp_u8((int)mapped, 0, 100);
+}
+```
+   - Bench-check this helper at close range (RSSI above `-60 dBm`) to confirm clamping remains `100` and does not overflow scoring.
+
+   - `score = w_rank * rank_score + w_rssi * rssi_norm + w_queue * (100 - queue_pct)`
    - Weights from EEPROM[0x06–0x08]. Adjustable via serial without reflash.
    - Switch only if `score_improvement >= 8` and cooldown of 20s has elapsed.
 
-5. **Transmission policy:**
-   - Periodic interval: 120s. Edge aggregates; this does not map 1:1 to LoRaWAN uplinks.
-   - ACK timeout from SF lookup table. Max retries: 3.
+6. **Transmission policy:**
+   - Base interval: 120s (or profile override).
+   - Maintain local rolling ACK-failure window: `ack_fail_window = 20` TX attempts (`ack_fail_pct = failures/20 * 100`).
+   - Apply congestion control policy above:
+     - pre-TX jitter `0..2000 ms`
+     - RSSI-based channel sensing + bounded backoff
+     - `effective_interval_s` by congestion state (1.0x / 1.5x / 2.0x)
+     - `effective_retries` by congestion state (3 / 2 / 1)
+   - ACK timeout from SF lookup table.
 
-6. **TX buffer overflow policy:**
+7. **TX buffer overflow policy:**
    - Sensor node has a single TX buffer (one packet). If a new sensor reading is ready while the previous packet is still pending ACK/retry, **overwrite the TX buffer with the newer reading**. The stale reading is discarded.
    - Rationale: for temperature/humidity telemetry, the latest reading is always more valuable than a stale one. Buffering multiple readings is not worth the SRAM cost on ATmega328P.
    - Log `TX_OVERWRITE` with the discarded `PacketUID` for post-analysis.
    - This should rarely trigger at 120s intervals (3 retries × 600ms ACK timeout = 1.8s worst case at SF7), but protects against sustained link failure scenarios.
 
-7. **Reliability:** Dedup by `(src_id, seq_num)` with 30s window, 16-entry table. TTL default 10.
+8. **Reliability:** Dedup by `(src_id, seq_num)` with 30s window, 16-entry table. TTL default 10.
 
-8. **Self-healing:** Parent timeout 35s. Promote best backup from neighbor table. Orphan policy as above.
+9. **Self-healing:** Parent timeout 35s. Promote best backup from neighbor table. Orphan policy as above.
 
-9. **Watchdog:** Kick at main loop top and post-TX. 8s timeout.
+10. **Watchdog:** Kick at main loop top and post-TX. 8s timeout.
 
 ---
 
@@ -519,28 +662,37 @@ When a relay or sensor loses its parent with no backup:
 
 ### Implementation Steps
 
-1. **Ingress pipeline:**
+1. **Mesh radio pin init (mandatory before `LoRa.begin()`):**
+   - Set explicit shield pin mapping:
+     - `LoRa.setPins(MESH_SS_PIN, MESH_RST_PIN, MESH_DIO0_PIN);`
+   - Use the same Cytron baseline pin profile as sensor nodes unless bench wiring confirms otherwise.
+
+2. **Ingress pipeline:**
    - Validate minimum length (10 bytes).
    - Drop self-originated frames.
    - Dedup check.
    - CRC16 validation over bytes 0–7. Drop on mismatch, increment EEPROM `crc_fail_count`, log `CRC_FAIL`.
    - ACK previous hop if `ACK_REQ` set.
 
-2. **Forwarding pipeline:**
+3. **Forwarding pipeline:**
    - Drop if TTL == 0. Log `TTL_DROP` with `PacketUID`.
    - Drop if no parent → enter orphan policy.
    - Set `prev_hop = MY_NODE_ID`, set `FWD` flag.
    - Forward bytes 0–(payload_len+9) unchanged. Do not inspect bytes 10–N.
 
-3. **Queue-aware beacon:** Compute `queue_pct`, `link_quality` (RSSI EWMA), `parent_health` (ACK success rate over last 20 attempts). Emit in `BeaconPayloadV1` every 10s.
+4. **Queue-aware beacon:** Compute `queue_pct`, `link_quality` (RSSI EWMA), `parent_health` (ACK success rate over last 20 attempts). Emit in `BeaconPayloadV1` every 10s.
+   - Apply startup beacon phase offset: `beacon_offset_ms = (node_id % 6) * 1667`.
+   - Relay congestion state uses this node's own forwarding ACK-failure window (`ack_fail_window = 20`) plus local `queue_pct` as defined in the shared congestion policy.
 
-4. **Parent algorithm:** Score with runtime weights. Switch with hysteresis + 20s dwell.
+5. **Parent algorithm:** Use the same shared normalization as sensor nodes (`MAX_RANK=4`, `rank_score` mapping above, `rssi_norm` in 0–100), then:
+   - `score = w_rank * rank_score + w_rssi * rssi_norm + w_queue * (100 - queue_pct)`
+   - Switch with hysteresis + 20s dwell.
 
-5. **Failure handling:** ACK failures ≥ 5 consecutive → re-parent. No backup → orphan state.
+6. **Failure handling:** ACK failures ≥ 5 consecutive → re-parent. No backup → orphan state.
 
-6. **Logging:** Per-packet events with `PacketUID`, RSSI, forward decision, drop reason. Persist drop counters in EEPROM.
+7. **Logging:** Per-packet events with `PacketUID`, RSSI, forward decision, drop reason. Persist drop counters in EEPROM.
 
-7. **Watchdog:** 8s hardware WDT. Kick at loop top and post-TX.
+8. **Watchdog:** 8s hardware WDT. Kick at loop top and post-TX.
 
 ---
 
@@ -563,18 +715,44 @@ When a relay or sensor loses its parent with no backup:
    - Receive mesh frames on Radio A.
    - ACK within half of sender's ACK timeout.
    - Dedup check.
-   - Push to aggregation buffer. On flush trigger (120s elapsed or 7 records full), pack `BridgeAggV1`, push to uplink queue.
+   - Push to aggregation buffer. On flush trigger (240s elapsed or 7 records full), pack `BridgeAggV1`, push to uplink queue.
 
 2. **`lorawan_task` (Core 1):**
    - OTAA join with exponential backoff.
+   - On join success: `LMIC_setAdrMode(0)` for fixed-airtime operation (TTN fair-use profile).
    - Dequeue aggregated telemetry frames.
+   - Optional TTN airtime guard (enabled in TTN fair-use profile):
+     - Track `daily_airtime_ms` and `airtime_window_start_s` (uptime-based 86400s window).
+     - Estimate airtime before each uplink from current SF + payload bytes.
+     - If `daily_airtime_ms + est_airtime_ms > 28000`, defer send for 60s (`AIRTIME_DEFER`) and keep current frame in task-local `pending_frame`.
+     - Reset `daily_airtime_ms` when uptime window reaches 86400s.
    - Telemetry aggregate → unconfirmed uplink.
    - On 3 consecutive uplink failures → log `UPLINK_FAIL` with `PacketUID` list, drop frame, continue.
    - TWDT kick each iteration.
 
-3. **Queue policy:** Depth 32. Overflow: drop oldest telemetry aggregate. Log `QUEUE_OVERFLOW` with dropped packet UIDs. Increment EEPROM `overflow_drop_count`.
+3. **Inter-task queue contract (mandatory):**
+   - Queue handle: `QueueHandle_t uplink_q` (created once in `edge_node.ino` before task creation).
+   - Element type:
 
-4. **Observability:** Log join state transitions, every uplink attempt (result + `PacketUID` list + `edge_uptime_s`), all overflow events.
+```cpp
+typedef struct {
+  uint8_t len;             // serialized BridgeAggV1 length (1..101)
+  uint8_t bytes[101];      // serialized BridgeAggV1 bytes
+  uint8_t record_count;    // 1..7
+  uint16_t uid_list[7];    // PacketUID list for overflow/failure logging
+} BridgeAggFrame;
+```
+
+   - Creation: `uplink_q = xQueueCreate(32, sizeof(BridgeAggFrame));`
+   - Producer: `mesh_task` only (`xQueueSend`).
+   - Consumer: `lorawan_task` only (`xQueueReceive`).
+   - No shared mutable payload buffer across tasks.
+
+4. **Queue policy:** Depth 32. On full queue, drop oldest aggregate (`xQueueReceive` then enqueue newest), log `QUEUE_OVERFLOW` with dropped packet UIDs, increment EEPROM `overflow_drop_count`.
+
+5. **LMIC thread-safety rule:** Only `lorawan_task` may call LMIC APIs (`os_runloop_once`, `LMIC_setTxData2`, join handlers).
+
+6. **Observability:** Log join state transitions, every uplink attempt (result + `PacketUID` list + `edge_uptime_s`), all overflow events.
 
 ---
 
@@ -632,11 +810,13 @@ Two access methods (use whichever is available):
 
 1. Go to [https://www.thethingsnetwork.org](https://www.thethingsnetwork.org) and log in (or create an account).
 2. Open the **Console** and select the **`as1`** (Singapore) cluster.
-3. Click **Gateways → Register gateway**.
-4. Enter the **Gateway EUI** from the WisGate bottom label.
-5. Set **Frequency plan** to `Asia 920-923 MHz (AS923 Group 1)`.
-6. Click **Register gateway**.
-7. Verify the gateway shows as **Connected** in the TTN console (may take 1–2 minutes after WisGate has internet access).
+3. Register **WisGate #1**:
+   - Click **Gateways → Register gateway**.
+   - Enter the **Gateway EUI** from WisGate #1 bottom label.
+   - Set **Frequency plan** to `Asia 920-923 MHz (AS923 Group 1)`.
+   - Click **Register gateway** and verify status is **Connected**.
+4. Register **WisGate #2** by repeating the same steps with the second unit's bottom-label Gateway EUI.
+5. Confirm both gateways appear as connected in TTN console.
 
 ### Step 6 — TTN Application Setup
 
@@ -671,15 +851,18 @@ Repeat for **both** edge bridges (`edge-bridge-01` and `edge-bridge-02`):
    - Comment out `#define CFG_us915 1`
    - Comment out `#define CFG_au915 1`
    - Uncomment `#define CFG_as923 1`
+   - Typical locations (confirm on each lab PC):
+     - Windows: `%USERPROFILE%\\Documents\\Arduino\\libraries\\MCCI_LoRaWAN_LMIC_library\\project_config\\lmic_project_config.h`
+     - macOS/Linux: `~/Documents/Arduino/libraries/MCCI_LoRaWAN_LMIC_library/project_config/lmic_project_config.h`
 2. In `edge_node/config.h`, define a complete LMIC pin map for **Radio B** (LoRaWAN radio), including NSS, RST, and DIO lines.
 3. Minimum required fields:
 
 ```cpp
-// Example template - replace placeholders with your actual wiring.
+// Baseline bench profile (ESP32 + dual SX1276):
 #define RADIO_B_NSS   15
-#define RADIO_B_RST   <SET_ACTUAL_PIN>
-#define RADIO_B_DIO0  <SET_ACTUAL_PIN>
-#define RADIO_B_DIO1  <SET_ACTUAL_PIN_OR_LMIC_UNUSED_PIN>
+#define RADIO_B_RST   27
+#define RADIO_B_DIO0  26
+#define RADIO_B_DIO1  33
 #define RADIO_B_DIO2  LMIC_UNUSED_PIN
 
 const lmic_pinmap lmic_pins = {
@@ -691,7 +874,9 @@ const lmic_pinmap lmic_pins = {
 ```
 
 4. Keep SPI assignment aligned with this plan: Radio B on HSPI (`SCK=14`, `MISO=12`, `MOSI=13`, `CS=15`).
-5. Do not apply this LMIC setup to sensor/relay Maker UNO nodes.
+   - Do not assign `RADIO_B_RST` to any HSPI/VSPI signal pin (for example, not `14/12/13/15/18/19/23/5`).
+5. Bench validation gate (mandatory): before edge firmware development, verify `RADIO_B_RST`, `RADIO_B_DIO0`, and `RADIO_B_DIO1` against physical wiring continuity and first-join logs. If board wiring differs from baseline profile, update these numeric constants in `edge_node/config.h` before continuing.
+6. Do not apply this LMIC setup to sensor/relay Maker UNO nodes.
 
 ### Step 8 — Deploy Payload Formatter
 
@@ -723,7 +908,7 @@ const lmic_pinmap lmic_pins = {
 
 ---
 
-## Pico W Flask Application Server
+## Pico W Application Server (MicroPython + Phew!)
 
 ### Role
 The Pico W is the **application layer only**. It does not handle any LoRaWAN protocol, network server functions, or gateway functions. Its sole job is to consume decoded telemetry from TTN and present it to the user.
@@ -733,7 +918,28 @@ The Pico W is the **application layer only**. It does not handle any LoRaWAN pro
 - Topic: `v3/{app-id}@ttn/devices/+/up`
 - On message received: parse JSON, extract `decoded_payload` fields, store in in-memory dict keyed by `mesh_src_id`.
 
-### Flask dashboard (served from Pico W)
+### Concurrency model (decision-complete)
+- Pico W runs a **single-thread cooperative loop** (no blocking dual-loop architecture).
+- MQTT path uses `client.check_msg()` with a short socket timeout (<= 200 ms).
+- HTTP path uses a non-blocking socket poll function (`http_poll_once()`), called every loop iteration.
+- MQTT reconnect policy is mandatory:
+  - wrap `mqtt_check_once()` in `try/except OSError`
+  - on exception, reconnect with bounded retry delay and log `MQTT_RECONNECT` on success
+- `main.py` loop shape:
+
+```python
+while True:
+    try:
+        mqtt_check_once()   # non-blocking
+    except OSError:
+        mqtt_reconnect_with_backoff()
+    http_poll_once()    # non-blocking
+    sleep_ms(50)
+```
+
+- Do not use blocking calls like `client.wait_msg()` or a blocking HTTP `serve_forever()` loop.
+
+### Dashboard (served from Pico W via Phew!)
 
 Serve a single-page HTML dashboard at `http://{pico-ip}/`. Refresh every 10 seconds via JavaScript `setInterval`.
 
@@ -747,12 +953,13 @@ Serve a single-page HTML dashboard at `http://{pico-ip}/`. Refresh every 10 seco
 
 **Implementation stack:**
 - MicroPython on Pico W.
-- `Phew!` library (lightweight MicroPython HTTP server) or minimal hand-rolled HTTP server.
+- `umqtt.simple` with non-blocking `check_msg()`.
+- Phew! (or equivalent MicroPython HTTP server) with non-blocking poll loop (socket timeout <= 200 ms).
 - Dashboard HTML embedded as a Python string — no external files needed.
 - All state kept in memory (no file system required for MVP).
 
 **Work package (`dashboard/`):**
-- `main.py` — boot, WiFi connect, MQTT subscribe loop, Flask/Phew serve loop.
+- `main.py` — boot, WiFi connect, cooperative scheduler loop (`mqtt_check_once()` + `http_poll_once()`).
 - `dashboard.py` — HTML template string with placeholder substitution.
 - `state.py` — in-memory node state dict with update and query functions.
 
@@ -767,15 +974,26 @@ Serve a single-page HTML dashboard at `http://{pico-ip}/`. Refresh every 10 seco
 | Default SF                 | SF7                          | With SF9 fallback |
 | ACK timeout                | Per SF lookup table          | |
 | Beacon interval            | 10s                          | |
-| Sensor periodic interval   | 120s                         | Edge aggregates |
+| Sensor periodic interval   | 120s                         | Low-latency lab default |
+| Sensor periodic interval (TTN fair-use profile) | 180s | Use for long runs on public TTN |
+| TX jitter (originated telemetry) | 0–2000 ms            | Random per TX |
+| Channel-sense method       | RSSI threshold pre-TX         | CAD optional enhancement |
+| Channel-sense attempts     | 2                            | Non-ACK packets |
+| Channel-sense backoff      | 50–200 ms                    | Random per attempt |
+| Busy threshold             | RSSI > -90 dBm               | Tune in field tests |
 | Max retries                | 3                            | |
+| Retries by congestion state| GREEN=3, YELLOW=2, RED=1    | Mesh nodes |
+| Interval multiplier by state | GREEN=1.0x, YELLOW=1.5x, RED=2.0x | Mesh nodes |
+| Congestion thresholds      | YELLOW: queue≥60 or ACK fail≥20%; RED: queue≥80 or ACK fail≥40% | 20-attempt window |
 | Parent timeout             | 35s                          | |
 | Dedup window               | 30s                          | |
 | Score weights              | rank 60%, RSSI 25%, queue 15% | Runtime-configurable |
 | Switch hysteresis          | score improvement ≥ 8        | |
 | Parent switch cooldown     | 20s                          | |
 | Orphan hold duration       | 60s                          | |
-| Aggregation flush interval | 120s or 7 records            | Edge bridge only |
+| Beacon phase offset        | `(node_id % 6) * 1667 ms`    | Applied once at boot |
+| Aggregation flush interval | 240s or 7 records            | Low-latency lab default |
+| Aggregation flush interval (TTN fair-use profile) | 450s or 7 records | Use with 180s sensor interval |
 | RSSI SF7→SF9 threshold     | < −105 dBm                   | Tune in field |
 | RSSI SF9→SF7 threshold     | > −95 dBm                    | |
 | WDT timeout (ATmega)       | 8s                           | |
@@ -802,7 +1020,8 @@ CSC2106-G33/
 ├── shared/                              # Shared protocol definitions (all node types)
 │   └── mesh_protocol.h                  #   MeshHeader, BeaconPayloadV1, BridgeAggV1,
 │                                        #   ACK timeout PROGMEM table, config struct,
-│                                        #   EEPROM address constants, CRC16
+│                                        #   EEPROM address constants, CRC16,
+│                                        #   rank normalization constants/helpers
 │
 ├── sensor_node/                         # Sensor node firmware (ATmega328P / Maker UNO)
 │   └── sensor_node.ino                  #   DHT22 driver, SensorPayload packing,
@@ -883,7 +1102,7 @@ CSC2106-G33/
 
 8. **Pico W application server** `dashboard/`:
    - MQTT subscriber to TTN.
-   - Flask/Phew dashboard serving topology, readings, and network health.
+   - Phew!-based dashboard serving topology, readings, and network health.
    - In-memory state management.
 
 9. **Experiment scripts** `tools/`: `collect_ttn.py`, `collect_serial.py`, `compute_pdr.py`, `check_integrity.py`, `compute_latency.py`, `plot_results.py`. Run after E2E path is validated.
@@ -976,24 +1195,33 @@ Log filenames include scenario label and timestamp: `logs/scenario1_baseline_202
 9. **Orphan drop:** Kill parent for > 60s. Verify `ORPHAN_DROP` logged, EEPROM counter incremented, node recovers after parent restoration.
 10. **TTL and dedup:** No packet loop amplification. Duplicate delivery rate = 0 under stable conditions.
 11. **WDT reset logging:** Inject artificial hang in test build. Verify EEPROM[0x14] increments and `WDT_RESET` logged on next boot.
-12. **TTN end-to-end:** Both edge bridges join and uplink through WisGate. Verify airtime < 10s/day per bridge on TTN console.
-13. **Aggregation correctness:** 7 sensor readings over 120s produce one LoRaWAN `BridgeAggV1` uplink, not seven. TTN decoded output contains all 7 records.
+12. **TTN end-to-end + airtime profile check:** Both edge bridges join and uplink through WisGate. In low-latency profile (120s/240s), verify projected airtime exceeds 30s/day and document this as public-TTN non-compliant. In TTN fair-use profile (180s/450s, SF7), verify airtime < 30s/day per bridge.
+13. **Aggregation correctness (steady state + burst):** With default 240s flush, nominal topology should produce ~4 records/uplink on bridge 1 and ~2 records/uplink on bridge 2. Under burst load, verify 7-record flush path (`record_count = 7`) decodes correctly.
 14. **Queue overflow logging:** Fill uplink queue past capacity. Verify `QUEUE_OVERFLOW` logged with packet UIDs, EEPROM counter incremented.
 15. **Pico W dashboard:** Node topology, latest readings (DHT22 temperature + humidity), and network health display correctly. Values match TTN decoded data.
 16. **Payload-agnostic relay verification:** Replace one DHT22 sensor node with a different payload pattern (e.g., random bytes). Relay and edge bridge must forward and aggregate it without error. Only the TTN payload formatter output will differ — the mesh pipeline itself must be unaffected.
+17. **TX jitter and channel-sense behavior:** Under synchronized start conditions, verify TX timestamps spread over jitter window and busy-sense events trigger bounded backoff (RSSI method; CAD optional if wired/supported).
+18. **Congestion state transitions:** Induce queue/ACK stress and verify nodes transition GREEN→YELLOW→RED and recover back with correct logs.
+19. **Adaptive retries:** In RED state, verify effective retries reduce to 1; in GREEN return to 3.
+20. **Beacon staggering:** On boot, verify beacon transmissions from 6 nodes are phase-offset across ~10s window.
+21. **Edge airtime guard:** In TTN fair-use profile, force projected daily airtime above threshold and verify `AIRTIME_DEFER` behavior and 86400s window reset.
+22. **ATmega flash footprint gate:** Run `avr-size` on sensor and relay binaries. Verify relay remains below the project threshold (warn at >90% flash).
 
 ---
 
 ## Acceptance Criteria
 
 1. Real `sensor → relay → edge → WisGate → TTN → Pico W` pipeline works end-to-end for both edge bridges.
-2. Airtime budget verified: TTN device airtime stats show < 10s/day per bridge under normal load.
+2. Airtime budget is explicitly validated against active profile: low-latency profile is documented as TTN fair-use non-compliant; TTN fair-use profile is measured/projection-checked to stay < 30s/day per bridge at SF7.
 3. **Relay is payload-agnostic:** zero corruption events across all test scenarios. Relay firmware must work unchanged with any sensor payload variant.
 4. Structured dataset across all three stress test scenarios with PDR per node, payload integrity, telemetry latency distribution, and EEPROM drop-reason breakdown. All results evaluated against pass/fail thresholds.
 5. Self-healing demonstrated: orphan recovery time and re-parent convergence time measured.
 6. WDT behaviour verified on bench before field deployment.
 7. Pico W dashboard shows topology, node health, latest readings (temperature + humidity).
 8. Report includes deployment guidance: node spacing, SF selection for tunnel geometry, score weight tuning, congestion handling.
+9. Congestion-control policy (jitter/channel-sense/state-based interval+retry) is validated with test cases 17–20.
+10. TTN fair-use profile edge airtime guard is validated (test case 21) for long-duration public TTN operation.
+11. ATmega flash usage is measured and recorded for sensor/relay builds (test case 22), with mitigation actions documented if relay exceeds 90% flash.
 
 ---
 
@@ -1003,7 +1231,7 @@ Log filenames include scenario label and timestamp: `logs/scenario1_baseline_202
 2. Edge hardware confirmed as ESP32 with dual SX1276 radios.
 3. All nodes are mains-powered (5V USB supply). No battery constraints.
 4. AS923 is mandatory.
-5. TTN fair use (30s/day/device) applies. Aggregation is required to comply.
+5. TTN fair use (30s/day/device) applies on public TTN. Low-latency defaults (120s/240s) exceed this budget; use TTN fair-use profile (180s/450s, SF7) or private network server for long-duration runs.
 6. Simulation-only uplink does not count as acceptance evidence.
 7. Score weights `[60, 25, 15]` are starting defaults — expect field tuning given tunnel RF variability.
 8. Pico W connects to the same WiFi/LAN as the TTN MQTT endpoint. Pico W does not need a public IP — TTN MQTT broker is cloud-hosted.

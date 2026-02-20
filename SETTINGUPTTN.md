@@ -238,6 +238,9 @@ Choose and enter a Device ID and an eight-byte Device EUI.
 **6.1.1 Configure the MCCI LoRaWAN LMIC Library**
 - Edit file lmic_project_config.h.
 - This file can be found at: ".../libraries/MCCI_LoRaWAN_LMIC_library/project_config"
+- Typical paths:
+  - Windows: `%USERPROFILE%\\Documents\\Arduino\\libraries\\MCCI_LoRaWAN_LMIC_library\\project_config\\lmic_project_config.h`
+  - macOS/Linux: `~/Documents/Arduino/libraries/MCCI_LoRaWAN_LMIC_library/project_config/lmic_project_config.h`
 - Comment "#define CFG_us915 1"
 - Comment "#define CFG_au915 1"
 - Uncomment "#define CFG_as923 1"
@@ -271,6 +274,8 @@ From the online tool, copy DevEUI, JoinEUI, and AppKey that you had converted an
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/48ae9c5a-6a1b-4b06-8f3e-7e1e1044939f)
 
 For this part, you can double-check by checking on the shield board itself to find the correct pin mapping. This is the pin mapping for the Cytron Shield-LoRa-RFM board.
+- This pin map is for the **LMIC LoRaWAN end-device flow** in this lab section.
+- For CSC2106 mesh sensor/relay nodes (Arduino-LoRa), wiring requirements differ and only the mesh radio pins defined in `IMPLEMENTATION_PLAN_v4.md` should be followed.
 
 ![image](https://github.com/drfuzzi/CSC2106_LoRaWAN/assets/108112390/cdcb9458-49ca-43ad-ac44-75736b566985)
 
