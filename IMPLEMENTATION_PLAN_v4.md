@@ -20,9 +20,9 @@ This implementation builds a two-tier underground LoRa mesh using **6 nodes**:
 
 | Role | Count | Hardware | Purpose |
 |------|-------|----------|---------|
-| **Sensor node** | 3 | Maker UNO + RFM95W + DHT22 | Generate telemetry, route upstream |
-| **Relay node** | 1 | Maker UNO + RFM95W | Forward packets opaquely (payload-agnostic) |
-| **Edge bridge** | 2 | ESP32 + dual SX1276 | Mesh sink + LoRaWAN end device uplinking to TTN |
+| **Sensor node** | 2 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) + DHT22 | Generate telemetry, route upstream |
+| **Relay node** | 1 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) | Forward packets opaquely (payload-agnostic) |
+| **Edge bridge** | 2 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) | Mesh sink + LoRaWAN end device uplinking to TTN |
 
 1. Three sensor nodes read DHT22 (temperature + humidity) and route upstream through mesh parents.
 2. One relay node forwards packets **opaquely** — it never reads sensor payloads. This is the core payload-agnostic design.
