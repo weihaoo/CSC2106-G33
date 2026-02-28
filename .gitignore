@@ -1,1 +1,34 @@
-edge_node/edge_node.ino
+# Build artifacts
+build/
+*.elf
+*.bin
+*.hex
+*.map
+
+# Arduino CLI
+.arduino15/
+libraries/
+
+# ESP32 specific
+sdkconfig
+sdkconfig.old
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+
+# Secrets — NEVER commit LoRaWAN keys
+secrets.h
+
+# Serial logs
+*.log
+
+references
