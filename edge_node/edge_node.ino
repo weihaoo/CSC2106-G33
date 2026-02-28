@@ -1,214 +1,342 @@
 // ════════════════════════════════════════════════════════════════════════════
-// EDGE NODE (SINK) - LoRaWAN End Device
+// EDGE NODE FIRMWARE - CSC2106 Group 33 (Person 3)
 // 
-// Role: Mesh sink (rank 0) + LoRaWAN uplink to gateway
+// Role: Mesh sink (rank 0) + LoRaWAN uplink to The Things Network
+//
+// Hardware: LilyGo T-Beam (SX1262 LoRa radio + AXP2101 PMU)
 // 
-// CONFIGURATION:
-//   - Device 1: Set MY_NODE_ID to 0x01
-//   - Device 2: Set MY_NODE_ID to 0x02
+// Responsibilities:
+//   1. Listen for mesh packets from sensors/relay
+//   2. Validate and acknowledge received packets
+//   3. Aggregate sensor readings into BridgeAggV1 format
+//   4. Send aggregated data to TTN via LoRaWAN (OTAA)
+//   5. Broadcast rank-0 beacons every 10s
+//   6. Time-share one radio between mesh RX and LoRaWAN TX
 //
-// HARDWARE:
-//   - ESP32 + LoRa module (e.g., TTGO LoRa32, Heltec WiFi LoRa)
-//   - Or Arduino with LoRa (LoRaWAN output via Serial for demo)
-//
-// PIN CONFIGURATION (adjust for your board):
-//   - TTGO LoRa32:    SS=18, RST=14, DIO0=26
-//   - Heltec WiFi:    SS=18, RST=14, DIO0=26
-//   - Arduino + RFM95: SS=10, RST=9,  DIO0=2
+// BEFORE FLASHING:
+//   1. Install libraries: RadioLib, XPowersLib (Arduino Library Manager)
+//   2. Edit config.h: Set NODE_ID (0x01 or 0x06) and OTAA credentials from Person 4
+//   3. Attach LoRa antenna to SMA connector (CRITICAL!)
 // ════════════════════════════════════════════════════════════════════════════
 
-#include <SPI.h>
-#include <LoRa.h>
+#include <Wire.h>
+#include <XPowersLib.h>
+#include <RadioLib.h>
+#include "config.h"
 #include "mesh_protocol.h"
 
 // ════════════════════════════════════════════════════════════════════════════
-// NODE CONFIGURATION - CHANGE FOR EACH DEVICE!
+// HARDWARE OBJECTS
 // ════════════════════════════════════════════════════════════════════════════
 
-#define MY_NODE_ID      0x01    // Device 1 = 0x01, Device 2 = 0x02
-#define MY_ROLE         ROLE_SINK
-#define MY_RANK         0       // Sink is always rank 0
+XPowersPMU PMU;
+SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
+LoRaWANNode lorawan_node(&radio, &AS923);  // AS923 for Singapore
 
 // ════════════════════════════════════════════════════════════════════════════
-// PIN CONFIGURATION - ADJUST FOR YOUR BOARD!
+// RADIO MODE (Time-sharing between mesh and LoRaWAN)
 // ════════════════════════════════════════════════════════════════════════════
 
-// For Arduino Uno + RFM95W
-#define LORA_SS         10
-#define LORA_RST        9
-#define LORA_DIO0       2
+enum RadioMode {
+    MESH_LISTEN,      // Listening for mesh packets (default state)
+    LORAWAN_TXRX      // Sending LoRaWAN uplink + waiting for RX windows
+};
 
-// For ESP32 (Radio A on VSPI) - Using conflict-free pins (uncomment if using ESP32)
-// #define LORA_SS      5
-// #define LORA_RST     25
-// #define LORA_DIO0    32
+RadioMode radio_mode = MESH_LISTEN;
+bool lorawan_joined = false;
 
 // ════════════════════════════════════════════════════════════════════════════
-// GLOBAL STATE
+// AGGREGATION BUFFER (stores up to 7 sensor readings)
 // ════════════════════════════════════════════════════════════════════════════
 
-Neighbor neighbors[MAX_NEIGHBORS];
-SeenPacket seen_packets[MAX_SEEN_PACKETS];
-uint8_t seen_index = 0;
+struct AggRecord {
+    uint8_t  mesh_src_id;
+    uint8_t  mesh_seq;
+    uint8_t  sensor_type_hint;
+    uint8_t  hop_estimate;
+    uint16_t edge_uptime_s;
+    uint8_t  opaque_payload[7];
+    bool     valid;
+};
 
-uint8_t seq_counter = 0;
+AggRecord agg_buffer[MAX_AGG_RECORDS];
+uint8_t agg_count = 0;
+uint32_t last_flush_time = 0;
+
+// ════════════════════════════════════════════════════════════════════════════
+// DEDUPLICATION TABLE
+// ════════════════════════════════════════════════════════════════════════════
+
+DedupEntry dedup_table[DEDUP_TABLE_SIZE];
+uint8_t dedup_index = 0;
+
+// ════════════════════════════════════════════════════════════════════════════
+// TIMERS & COUNTERS
+// ════════════════════════════════════════════════════════════════════════════
+
 uint32_t last_beacon_time = 0;
+uint32_t boot_time = 0;
 uint32_t packets_received = 0;
-uint32_t packets_forwarded = 0;
-
-// RX/TX buffers
-uint8_t rx_buffer[64];
-uint8_t tx_buffer[64];
+uint32_t packets_dropped = 0;
+uint32_t uplinks_sent = 0;
 
 // ════════════════════════════════════════════════════════════════════════════
-// SETUP
+// SETUP - RUNS ONCE AT BOOT
 // ════════════════════════════════════════════════════════════════════════════
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial && millis() < 3000);  // Wait for Serial (max 3s)
+    delay(1000);  // Wait for serial to initialize
     
-    Serial.println();
-    Serial.println(F("════════════════════════════════════════════════════"));
-    Serial.println(F("       EDGE NODE (SINK) - LoRaWAN End Device"));
+    Serial.println(F("\n\n════════════════════════════════════════════════════"));
+    Serial.println(F("     EDGE NODE - CSC2106 G33 (Person 3)"));
     Serial.println(F("════════════════════════════════════════════════════"));
     Serial.print(F("Node ID: 0x"));
-    Serial.println(MY_NODE_ID, HEX);
-    Serial.print(F("Role: SINK (Rank "));
-    Serial.print(MY_RANK);
-    Serial.println(F(")"));
-    Serial.println(F("════════════════════════════════════════════════════"));
+    Serial.println(NODE_ID, HEX);
+    Serial.print(F("Rank: "));
+    Serial.println(MY_RANK);
+    Serial.println(F("════════════════════════════════════════════════════\n"));
     
-    // Initialize LoRa
-    LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 1: PMU INITIALIZATION (CRITICAL!)
+    // ──────────────────────────────────────────────────────────────────────
     
-    if (!LoRa.begin(LORA_FREQUENCY)) {
-        Serial.println(F("ERROR: LoRa init failed!"));
-        while (1);
+    Serial.println(F("[INIT] Initializing PMU (AXP2101)..."));
+    Wire.begin(PMU_SDA, PMU_SCL);
+    
+    if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, PMU_SDA, PMU_SCL)) {
+        Serial.println(F("[ERROR] PMU init failed! Check I2C wiring."));
+        while (true) delay(1000);
     }
     
-    // Configure LoRa
-    LoRa.setSpreadingFactor(LORA_SPREADING);
-    LoRa.setSignalBandwidth(LORA_BANDWIDTH);
-    LoRa.setTxPower(LORA_TX_POWER);
-    LoRa.enableCrc();
+    // Power on the SX1262 radio via ALDO2 rail
+    PMU.setALDO2Voltage(3300);  // 3.3V
+    PMU.enableALDO2();
+    Serial.println(F("[OK] PMU initialized — LoRa radio powered via ALDO2"));
     
-    Serial.println(F("LoRa initialized successfully"));
-    Serial.print(F("Frequency: "));
-    Serial.print(LORA_FREQUENCY / 1E6);
-    Serial.println(F(" MHz"));
+    delay(100);  // Let radio power stabilize
     
-    // Initialize neighbor table
-    memset(neighbors, 0, sizeof(neighbors));
-    memset(seen_packets, 0, sizeof(seen_packets));
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 2: RADIOLIB MESH INITIALIZATION
+    // ──────────────────────────────────────────────────────────────────────
     
-    // Send initial beacon
-    broadcast_beacon();
+    Serial.println(F("[INIT] Initializing RadioLib for mesh..."));
     
-    Serial.println(F("────────────────────────────────────────────────────"));
-    Serial.println(F("Listening for mesh packets..."));
-    Serial.println(F("────────────────────────────────────────────────────"));
+    int state = radio.begin(LORA_FREQUENCY);
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print(F("[ERROR] RadioLib init failed, code "));
+        Serial.println(state);
+        while (true) delay(1000);
+    }
+    
+    // Configure LoRa for mesh (SF7, 125kHz, CR 4/5, sync 0x12)
+    radio.setSpreadingFactor(LORA_SPREADING);
+    radio.setBandwidth(LORA_BANDWIDTH);
+    radio.setCodingRate(LORA_CODING_RATE);
+    radio.setSyncWord(LORA_SYNC_WORD);
+    radio.setOutputPower(LORA_TX_POWER);
+    
+    Serial.println(F("[OK] RadioLib mesh config:"));
+    Serial.print(F("     Frequency: "));
+    Serial.print(LORA_FREQUENCY);
+    Serial.println(F(" MHz (AS923)"));
+    Serial.print(F("     SF: "));
+    Serial.print(LORA_SPREADING);
+    Serial.print(F(", BW: "));
+    Serial.print(LORA_BANDWIDTH);
+    Serial.println(F(" kHz"));
+    
+    // Start receiving mesh packets
+    radio.startReceive();
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 3: LORAWAN OTAA JOIN
+    // ──────────────────────────────────────────────────────────────────────
+    
+    Serial.println(F("\n[INIT] Starting LoRaWAN OTAA join..."));
+    Serial.print(F("     DevEUI: "));
+    Serial.println((unsigned long)DEV_EUI, HEX);
+    Serial.print(F("     JoinEUI: "));
+    Serial.println((unsigned long)JOIN_EUI, HEX);
+    
+    // Begin LoRaWAN with OTAA
+    state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print(F("[ERROR] LoRaWAN begin failed, code "));
+        Serial.println(state);
+    }
+    
+    // Attempt OTAA join (blocking, up to 60s)
+    state = lorawan_node.activateOTAA();
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println(F("[OK] LoRaWAN OTAA join successful!"));
+        lorawan_joined = true;
+    } else {
+        Serial.print(F("[WARN] LoRaWAN join failed, code "));
+        Serial.println(state);
+        Serial.println(F("     Will retry on next uplink attempt"));
+    }
+    
+    // Switch radio back to mesh mode after join
+    switch_to_mesh_rx();
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // INITIALIZATION COMPLETE
+    // ──────────────────────────────────────────────────────────────────────
+    
+    memset(agg_buffer, 0, sizeof(agg_buffer));
+    memset(dedup_table, 0, sizeof(dedup_table));
+    
+    boot_time = millis();
+    last_flush_time = millis();
+    last_beacon_time = millis() - BEACON_INTERVAL + BEACON_PHASE_OFFSET;
+    
+    Serial.println(F("\n════════════════════════════════════════════════════"));
+    Serial.println(F("Edge node ready! Listening for mesh packets..."));
+    Serial.println(F("════════════════════════════════════════════════════\n"));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// MAIN LOOP
+// MAIN LOOP - COOPERATIVE TIME-SHARING
 // ════════════════════════════════════════════════════════════════════════════
 
 void loop() {
-    // Check for incoming packets
-    check_lora_receive();
+    uint32_t now = millis();
     
-    // Periodic beacon broadcast
-    if (millis() - last_beacon_time >= BEACON_INTERVAL) {
-        broadcast_beacon();
-        last_beacon_time = millis();
-    }
-    
-    // Cleanup stale neighbors (optional, every 60s)
-    static uint32_t last_cleanup = 0;
-    if (millis() - last_cleanup >= 60000) {
-        cleanup_stale_neighbors();
-        last_cleanup = millis();
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// LORA RECEIVE
-// ════════════════════════════════════════════════════════════════════════════
-
-void check_lora_receive() {
-    int packet_size = LoRa.parsePacket();
-    
-    if (packet_size > 0) {
-        // Read packet
-        uint8_t len = 0;
-        while (LoRa.available() && len < sizeof(rx_buffer)) {
-            rx_buffer[len++] = LoRa.read();
+    if (radio_mode == MESH_LISTEN) {
+        // ──────────────────────────────────────────────────────────────────
+        // NORMAL STATE: Listen for mesh packets
+        // ──────────────────────────────────────────────────────────────────
+        
+        receive_mesh_packets();
+        broadcast_beacon_if_due();
+        
+        // Check if we need to flush to LoRaWAN
+        bool timeout_flush = (now - last_flush_time >= AGG_FLUSH_TIMEOUT);
+        bool buffer_flush = (agg_count >= MAX_AGG_RECORDS);
+        
+        if ((timeout_flush || buffer_flush) && agg_count > 0 && lorawan_joined) {
+            // Switch to LoRaWAN mode to send uplink
+            Serial.println(F("\n[FLUSH] Trigger detected, switching to LoRaWAN mode"));
+            radio_mode = LORAWAN_TXRX;
+            send_lorawan_uplink();
+            switch_to_mesh_rx();
+            radio_mode = MESH_LISTEN;
         }
         
-        int rssi = LoRa.packetRssi();
-        float snr = LoRa.packetSnr();
-        
-        packets_received++;
-        
-        // Process packet
-        process_received_packet(rx_buffer, len, rssi, snr);
+    } else {
+        // ──────────────────────────────────────────────────────────────────
+        // LORAWAN_TXRX STATE: Currently handled synchronously in send_lorawan_uplink()
+        // This state is temporary (~5s) and automatically returns to MESH_LISTEN
+        // ──────────────────────────────────────────────────────────────────
     }
+    
+    delay(2);  // Small tick delay to prevent tight looping
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// PACKET PROCESSING
+// MESH PACKET RECEPTION (PHASE 2)
 // ════════════════════════════════════════════════════════════════════════════
 
-void process_received_packet(uint8_t* packet, uint8_t len, int rssi, float snr) {
-    // Validate minimum length
-    if (len < sizeof(MeshHeader)) {
-        Serial.println(F("RX: Packet too short, ignoring"));
+void receive_mesh_packets() {
+    // Check if packet available (non-blocking)
+    if (!radio.available()) {
         return;
     }
     
-    MeshHeader* hdr = (MeshHeader*)packet;
-    uint8_t* payload = packet + sizeof(MeshHeader);
-    uint8_t pkt_type = get_packet_type(hdr->flags);
+    uint8_t buf[128];
+    int len = radio.readData(buf, sizeof(buf));
+    int rssi = radio.getRSSI();
+    float snr = radio.getSNR();
     
-    // Debug output
-    Serial.println(F("────────────────────────────────────────────────────"));
-    Serial.print(F("RX: type=0x"));
-    Serial.print(pkt_type, HEX);
-    Serial.print(F(" src=0x"));
-    Serial.print(hdr->src_id, HEX);
-    Serial.print(F(" prev=0x"));
-    Serial.print(hdr->prev_hop, HEX);
-    Serial.print(F(" seq="));
-    Serial.print(hdr->seq_num);
-    Serial.print(F(" rank="));
-    Serial.print(hdr->rank);
-    Serial.print(F(" RSSI="));
-    Serial.print(rssi);
-    Serial.print(F(" SNR="));
-    Serial.println(snr);
+    packets_received++;
     
-    // Handle by packet type
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 1: Minimum length check
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (len < MESH_HEADER_SIZE) {
+        Serial.print(F("[DROP] Packet too short ("));
+        Serial.print(len);
+        Serial.println(F(" bytes)"));
+        packets_dropped++;
+        return;
+    }
+    
+    MeshHeader* hdr = (MeshHeader*)buf;
+    uint8_t* payload = buf + MESH_HEADER_SIZE;
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 2: Self-check (ignore own packets)
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (hdr->src_id == NODE_ID) {
+        // This is our own packet echoing back, ignore it
+        return;
+    }
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 3: Deduplication check
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (is_duplicate(hdr->src_id, hdr->seq_num)) {
+        Serial.print(F("[DROP] Duplicate | src=0x"));
+        Serial.print(hdr->src_id, HEX);
+        Serial.print(F(" seq="));
+        Serial.println(hdr->seq_num);
+        packets_dropped++;
+        return;
+    }
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 4: CRC check
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (!validate_mesh_crc(hdr)) {
+        Serial.print(F("[DROP] CRC_FAIL | src=0x"));
+        Serial.print(hdr->src_id, HEX);
+        Serial.print(F(" seq="));
+        Serial.println(hdr->seq_num);
+        packets_dropped++;
+        return;
+    }
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 5: TTL check
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (hdr->ttl == 0) {
+        Serial.print(F("[DROP] TTL=0 | src=0x"));
+        Serial.print(hdr->src_id, HEX);
+        Serial.print(F(" seq="));
+        Serial.println(hdr->seq_num);
+        packets_dropped++;
+        return;
+    }
+    
+    // ──────────────────────────────────────────────────────────────────────
+    // PACKET VALID: Mark as seen and process by type
+    // ──────────────────────────────────────────────────────────────────────
+    
+    mark_seen(hdr->src_id, hdr->seq_num);
+    
+    uint8_t pkt_type = GET_PKT_TYPE(hdr->flags);
+    
     switch (pkt_type) {
         case PKT_TYPE_BEACON:
-            handle_beacon(hdr, rssi);
+            handle_beacon(hdr, rssi, snr);
             break;
             
         case PKT_TYPE_DATA:
-            handle_data(hdr, payload, rssi);
+            handle_data(hdr, payload, rssi, snr);
             break;
             
         case PKT_TYPE_ACK:
-            // Sinks don't need to process ACKs (they don't send data upward)
-            Serial.println(F("RX: ACK received (ignored by sink)"));
-            break;
-            
-        case PKT_TYPE_RELAY:
-            handle_lorawan_relay(hdr, payload);
+            // Edge nodes don't process ACKs (we don't send data upward in mesh)
             break;
             
         default:
-            Serial.print(F("RX: Unknown packet type 0x"));
+            Serial.print(F("[WARN] Unknown packet type 0x"));
             Serial.println(pkt_type, HEX);
     }
 }
@@ -217,178 +345,123 @@ void process_received_packet(uint8_t* packet, uint8_t len, int rssi, float snr) 
 // BEACON HANDLING
 // ════════════════════════════════════════════════════════════════════════════
 
-void handle_beacon(MeshHeader* hdr, int rssi) {
-    Serial.print(F("RX BEACON from node 0x"));
+void handle_beacon(MeshHeader* hdr, int rssi, float snr) {
+    Serial.print(F("[BCN] RX from 0x"));
     Serial.print(hdr->src_id, HEX);
-    Serial.print(F(" rank="));
+    Serial.print(F(" | rank="));
     Serial.print(hdr->rank);
-    Serial.print(F(" RSSI="));
+    Serial.print(F(" | rssi="));
     Serial.println(rssi);
     
-    // Update neighbor table
-    update_neighbor(hdr->src_id, hdr->rank, rssi);
-    
-    // As a sink, we don't select parents (we ARE the destination)
-    // But we track neighbors for network visibility
+    // Edge nodes don't select parents (we ARE the top of the hierarchy)
+    // But we can log beacons for debugging/visibility
 }
 
-void broadcast_beacon() {
+void broadcast_beacon_if_due() {
+    if (millis() - last_beacon_time < BEACON_INTERVAL) {
+        return;
+    }
+    
+    // Build MeshHeader
     MeshHeader hdr;
     memset(&hdr, 0, sizeof(hdr));
     
     hdr.flags = PKT_TYPE_BEACON;
-    hdr.src_id = MY_NODE_ID;
-    hdr.dst_id = 0xFF;          // Broadcast
-    hdr.prev_hop = MY_NODE_ID;
-    hdr.ttl = 1;                // Beacons don't hop
-    hdr.seq_num = seq_counter++;
-    hdr.rank = MY_RANK;         // Always 0 for sink
-    hdr.payload_len = 0;
+    hdr.src_id = NODE_ID;
+    hdr.dst_id = 0xFF;  // Broadcast
+    hdr.prev_hop = NODE_ID;
+    hdr.ttl = 1;  // Beacons don't hop
+    hdr.seq_num = (uint8_t)(millis() / 1000);  // Use time as sequence
+    hdr.rank = MY_RANK;  // Always 0 for edge
+    hdr.payload_len = BEACON_PAYLOAD_SIZE;
     
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&hdr, sizeof(hdr));
-    LoRa.endPacket();
+    // Compute CRC over bytes 0-7
+    hdr.crc16 = compute_mesh_crc(&hdr);
     
-    Serial.print(F("TX BEACON: rank="));
-    Serial.print(MY_RANK);
-    Serial.print(F(" seq="));
-    Serial.println(hdr.seq_num);
+    // Build BeaconPayload
+    BeaconPayload bcn;
+    bcn.schema_version = 0x01;
+    bcn.queue_pct = (agg_count * 100) / MAX_AGG_RECORDS;  // Real queue %
+    bcn.link_quality = 100;  // Edge has perfect "link" to itself
+    bcn.parent_health = lorawan_joined ? 100 : 0;  // Health = LoRaWAN status
+    
+    // Transmit
+    uint8_t pkt[MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE];
+    memcpy(pkt, &hdr, MESH_HEADER_SIZE);
+    memcpy(pkt + MESH_HEADER_SIZE, &bcn, BEACON_PAYLOAD_SIZE);
+    
+    int state = radio.transmit(pkt, sizeof(pkt));
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.print(F("[BCN] TX | rank="));
+        Serial.print(MY_RANK);
+        Serial.print(F(" | queue="));
+        Serial.print(bcn.queue_pct);
+        Serial.println(F("%"));
+    } else {
+        Serial.print(F("[BCN] TX failed, code "));
+        Serial.println(state);
+    }
+    
+    last_beacon_time = millis();
+    radio.startReceive();  // Return to RX mode
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// DATA HANDLING (Payload-Agnostic!)
+// DATA PACKET HANDLING (PHASE 3)
 // ════════════════════════════════════════════════════════════════════════════
 
-void handle_data(MeshHeader* hdr, uint8_t* payload, int rssi) {
-    // Check for duplicates
-    if (is_duplicate(hdr->src_id, hdr->seq_num)) {
-        Serial.println(F("RX DATA: Duplicate, ignoring"));
-        return;
-    }
-    mark_seen(hdr->src_id, hdr->seq_num);
+void handle_data(MeshHeader* hdr, uint8_t* payload, int rssi, float snr) {
+    uint8_t hop_count = 10 - hdr->ttl;  // Estimate hops from remaining TTL
     
     Serial.println(F("────────────────────────────────────────────────────"));
-    Serial.println(F("📦 DATA RECEIVED AT SINK!"));
-    Serial.print(F("   From: Node 0x"));
-    Serial.println(hdr->src_id, HEX);
-    Serial.print(F("   Payload length: "));
-    Serial.print(hdr->payload_len);
-    Serial.println(F(" bytes"));
-    
-    // Print payload bytes (PAYLOAD-AGNOSTIC - we don't parse it!)
-    Serial.print(F("   Payload (hex): "));
-    for (uint8_t i = 0; i < hdr->payload_len; i++) {
-        if (payload[i] < 0x10) Serial.print(F("0"));
-        Serial.print(payload[i], HEX);
-        Serial.print(F(" "));
-    }
-    Serial.println();
-    
-    // Send ACK if requested
-    if (is_ack_requested(hdr->flags)) {
-        send_ack(hdr->prev_hop, hdr->seq_num);
-    }
-    
-    // Forward to LoRaWAN (or Serial for demo)
-    forward_to_lorawan(hdr, payload);
-    
-    packets_forwarded++;
-    Serial.print(F("   Total forwarded: "));
-    Serial.println(packets_forwarded);
-    Serial.println(F("────────────────────────────────────────────────────"));
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// LORAWAN RELAY HANDLING (Version-Agnostic!)
-// ════════════════════════════════════════════════════════════════════════════
-
-void handle_lorawan_relay(MeshHeader* hdr, uint8_t* payload) {
-    Serial.println(F("────────────────────────────────────────────────────"));
-    Serial.println(F("📡 LORAWAN RELAY PACKET RECEIVED!"));
-    Serial.print(F("   Captured by: Node 0x"));
-    Serial.println(hdr->src_id, HEX);
-    Serial.print(F("   LoRaWAN packet length: "));
-    Serial.print(hdr->payload_len);
-    Serial.println(F(" bytes"));
-    
-    // Print LoRaWAN packet bytes (VERSION-AGNOSTIC - we don't parse it!)
-    Serial.print(F("   LoRaWAN PHYPayload (hex): "));
-    for (uint8_t i = 0; i < hdr->payload_len; i++) {
-        if (payload[i] < 0x10) Serial.print(F("0"));
-        Serial.print(payload[i], HEX);
-        Serial.print(F(" "));
-    }
-    Serial.println();
-    
-    // Send ACK if requested
-    if (is_ack_requested(hdr->flags)) {
-        send_ack(hdr->prev_hop, hdr->seq_num);
-    }
-    
-    // Re-transmit original LoRaWAN packet to gateway
-    // In real implementation, this would be a raw LoRa transmission
-    // For demo, we just print it
-    Serial.println(F("   ACTION: Would re-transmit to LoRaWAN gateway"));
-    Serial.println(F("   (Version-agnostic: packet forwarded unchanged!)"));
-    Serial.println(F("────────────────────────────────────────────────────"));
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// LORAWAN OUTPUT (Demo: Serial output instead of actual LoRaWAN)
-// ════════════════════════════════════════════════════════════════════════════
-
-void forward_to_lorawan(MeshHeader* hdr, uint8_t* payload) {
-    Serial.println(F(""));
-    Serial.println(F("╔══════════════════════════════════════════════════╗"));
-    Serial.println(F("║           LORAWAN UPLINK (SIMULATED)             ║"));
-    Serial.println(F("╠══════════════════════════════════════════════════╣"));
-    Serial.print(F("║ Edge Node: 0x"));
-    if (MY_NODE_ID < 0x10) Serial.print(F("0"));
-    Serial.print(MY_NODE_ID, HEX);
-    Serial.println(F("                                  ║"));
-    Serial.print(F("║ Source Mesh Node: 0x"));
-    if (hdr->src_id < 0x10) Serial.print(F("0"));
+    Serial.print(F("RX_MESH | src=0x"));
     Serial.print(hdr->src_id, HEX);
-    Serial.println(F("                          ║"));
-    Serial.print(F("║ Payload Length: "));
-    Serial.print(hdr->payload_len);
-    Serial.println(F(" bytes                          ║"));
-    Serial.println(F("║                                                  ║"));
-    Serial.print(F("║ Data: "));
+    Serial.print(F(" | seq="));
+    Serial.print(hdr->seq_num);
+    Serial.print(F(" | hops="));
+    Serial.print(hop_count);
+    Serial.print(F(" | rssi="));
+    Serial.println(rssi);
     
-    // Format payload as hex string
-    for (uint8_t i = 0; i < hdr->payload_len && i < 16; i++) {
-        if (payload[i] < 0x10) Serial.print(F("0"));
-        Serial.print(payload[i], HEX);
-        Serial.print(F(" "));
+    // ──────────────────────────────────────────────────────────────────────
+    // SEND ACK (if requested)
+    // ──────────────────────────────────────────────────────────────────────
+    
+    if (IS_ACK_REQUESTED(hdr->flags)) {
+        send_ack(hdr->prev_hop, hdr->seq_num);
     }
-    if (hdr->payload_len > 16) Serial.print(F("..."));
     
-    // Padding
-    uint8_t printed = min(hdr->payload_len, (uint8_t)16) * 3;
-    for (uint8_t i = printed; i < 40; i++) Serial.print(F(" "));
-    Serial.println(F("║"));
+    // ──────────────────────────────────────────────────────────────────────
+    // ADD TO AGGREGATION BUFFER (PHASE 4)
+    // ──────────────────────────────────────────────────────────────────────
     
-    Serial.println(F("╠══════════════════════════════════════════════════╣"));
-    Serial.println(F("║ In production: LMIC_setTxData2() would be called ║"));
-    Serial.println(F("║ to send this to the LoRaWAN gateway.             ║"));
-    Serial.println(F("╚══════════════════════════════════════════════════╝"));
-    Serial.println();
+    if (agg_count < MAX_AGG_RECORDS && hdr->payload_len == SENSOR_PAYLOAD_SIZE) {
+        AggRecord* rec = &agg_buffer[agg_count];
+        
+        rec->mesh_src_id = hdr->src_id;
+        rec->mesh_seq = hdr->seq_num;
+        rec->sensor_type_hint = SENSOR_TYPE_DHT22;
+        rec->hop_estimate = hop_count;
+        rec->edge_uptime_s = (millis() - boot_time) / 1000;
+        memcpy(rec->opaque_payload, payload, SENSOR_PAYLOAD_SIZE);
+        rec->valid = true;
+        
+        agg_count++;
+        
+        Serial.print(F("AGG | Added to buffer | count="));
+        Serial.print(agg_count);
+        Serial.print(F("/"));
+        Serial.println(MAX_AGG_RECORDS);
+    } else {
+        Serial.println(F("[WARN] Aggregation buffer full or invalid payload length"));
+    }
     
-    // ═══════════════════════════════════════════════════════════════════════
-    // PRODUCTION CODE (uncomment when using LMIC on ESP32):
-    // ═══════════════════════════════════════════════════════════════════════
-    // 
-    // uint8_t lorawan_payload[64];
-    // lorawan_payload[0] = hdr->src_id;  // Include mesh source ID
-    // memcpy(&lorawan_payload[1], payload, hdr->payload_len);
-    // 
-    // LMIC_setTxData2(1, lorawan_payload, hdr->payload_len + 1, 0);
-    // ═══════════════════════════════════════════════════════════════════════
+    Serial.println(F("────────────────────────────────────────────────────"));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// ACK HANDLING
+// ACK SENDING (PHASE 3)
 // ════════════════════════════════════════════════════════════════════════════
 
 void send_ack(uint8_t to_node, uint8_t seq) {
@@ -396,132 +469,146 @@ void send_ack(uint8_t to_node, uint8_t seq) {
     memset(&ack, 0, sizeof(ack));
     
     ack.flags = PKT_TYPE_ACK;
-    ack.src_id = MY_NODE_ID;
+    ack.src_id = NODE_ID;
     ack.dst_id = to_node;
-    ack.prev_hop = MY_NODE_ID;
+    ack.prev_hop = NODE_ID;
     ack.ttl = 1;
-    ack.seq_num = seq;          // Echo the sequence number
+    ack.seq_num = seq;  // Echo the sequence number
     ack.rank = MY_RANK;
     ack.payload_len = 0;
+    ack.crc16 = compute_mesh_crc(&ack);
     
-    // Small delay to avoid collision
-    delay(random(10, 50));
+    delay(random(10, 50));  // Small jitter to avoid collision
     
-    LoRa.beginPacket();
-    LoRa.write((uint8_t*)&ack, sizeof(ack));
-    LoRa.endPacket();
+    int state = radio.transmit((uint8_t*)&ack, MESH_HEADER_SIZE);
     
-    Serial.print(F("TX ACK to 0x"));
-    Serial.print(to_node, HEX);
-    Serial.print(F(" for seq="));
-    Serial.println(seq);
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.print(F("ACK | to=0x"));
+        Serial.print(to_node, HEX);
+        Serial.print(F(" | seq="));
+        Serial.println(seq);
+    }
+    
+    radio.startReceive();  // Return to RX mode
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// NEIGHBOR TABLE MANAGEMENT
+// LORAWAN UPLINK (PHASE 4 & 5)
 // ════════════════════════════════════════════════════════════════════════════
 
-void update_neighbor(uint8_t node_id, uint8_t rank, int8_t rssi) {
-    // Find existing or empty slot
-    int8_t slot = -1;
-    int8_t empty_slot = -1;
-    
-    for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
-        if (neighbors[i].node_id == node_id) {
-            slot = i;
-            break;
-        }
-        if (neighbors[i].node_id == 0 && empty_slot < 0) {
-            empty_slot = i;
-        }
+void send_lorawan_uplink() {
+    if (agg_count == 0) {
+        Serial.println(F("[FLUSH] No records to send, skipping uplink"));
+        return;
     }
     
-    // Use existing slot or empty slot
-    if (slot < 0) {
-        if (empty_slot < 0) {
-            Serial.println(F("WARNING: Neighbor table full!"));
-            return;
-        }
-        slot = empty_slot;
+    // ──────────────────────────────────────────────────────────────────────
+    // PACK BRIDGEAGGV1 FORMAT
+    // ──────────────────────────────────────────────────────────────────────
+    
+    uint8_t uplink_buf[3 + (MAX_AGG_RECORDS * BRIDGE_RECORD_SIZE)];
+    uint8_t idx = 0;
+    
+    // Header (3 bytes)
+    uplink_buf[idx++] = BRIDGE_AGG_SCHEMA_V1;  // schema_version = 0x02
+    uplink_buf[idx++] = NODE_ID;                // bridge_id
+    uplink_buf[idx++] = agg_count;              // record_count
+    
+    // Records (14 bytes each)
+    for (uint8_t i = 0; i < agg_count; i++) {
+        if (!agg_buffer[i].valid) continue;
+        
+        AggRecord* rec = &agg_buffer[i];
+        
+        uplink_buf[idx++] = rec->mesh_src_id;
+        uplink_buf[idx++] = rec->mesh_seq;
+        uplink_buf[idx++] = rec->sensor_type_hint;
+        uplink_buf[idx++] = rec->hop_estimate;
+        uplink_buf[idx++] = (rec->edge_uptime_s >> 8) & 0xFF;  // High byte
+        uplink_buf[idx++] = rec->edge_uptime_s & 0xFF;         // Low byte
+        uplink_buf[idx++] = SENSOR_PAYLOAD_SIZE;  // opaque_len
+        memcpy(&uplink_buf[idx], rec->opaque_payload, SENSOR_PAYLOAD_SIZE);
+        idx += SENSOR_PAYLOAD_SIZE;
     }
     
-    // Update entry
-    neighbors[slot].node_id = node_id;
-    neighbors[slot].rank = rank;
-    neighbors[slot].rssi = rssi;
-    neighbors[slot].last_seen = millis();
-    neighbors[slot].fail_count = 0;  // Reset on successful reception
-}
-
-void cleanup_stale_neighbors() {
-    uint32_t now = millis();
-    uint8_t removed = 0;
+    Serial.println(F("\n════════════════════════════════════════════════════"));
+    Serial.print(F("FLUSH | records="));
+    Serial.print(agg_count);
+    Serial.print(F(" | bytes="));
+    Serial.println(idx);
     
-    for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
-        if (neighbors[i].node_id != 0) {
-            if (now - neighbors[i].last_seen > PARENT_TIMEOUT * 2) {
-                Serial.print(F("Removing stale neighbor 0x"));
-                Serial.println(neighbors[i].node_id, HEX);
-                neighbors[i].node_id = 0;
-                removed++;
-            }
-        }
+    // ──────────────────────────────────────────────────────────────────────
+    // SEND VIA LORAWAN (blocking, ~5s for RX windows)
+    // ──────────────────────────────────────────────────────────────────────
+    
+    int state = lorawan_node.sendReceive(uplink_buf, idx, LORAWAN_FPORT);
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println(F("UPLINK | OK | TTN received"));
+        uplinks_sent++;
+    } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
+        Serial.println(F("UPLINK | OK (no downlink)"));
+        uplinks_sent++;
+    } else {
+        Serial.print(F("UPLINK | FAILED | code "));
+        Serial.println(state);
     }
     
-    if (removed > 0) {
-        print_neighbor_table();
-    }
-}
-
-void print_neighbor_table() {
-    Serial.println(F("┌──────────┬──────┬───────┬──────────┐"));
-    Serial.println(F("│ Neighbor │ Rank │ RSSI  │ Age (s)  │"));
-    Serial.println(F("├──────────┼──────┼───────┼──────────┤"));
+    Serial.print(F("Total uplinks sent: "));
+    Serial.println(uplinks_sent);
+    Serial.println(F("════════════════════════════════════════════════════\n"));
     
-    uint8_t count = 0;
-    for (uint8_t i = 0; i < MAX_NEIGHBORS; i++) {
-        if (neighbors[i].node_id != 0) {
-            Serial.print(F("│   0x"));
-            if (neighbors[i].node_id < 0x10) Serial.print(F("0"));
-            Serial.print(neighbors[i].node_id, HEX);
-            Serial.print(F("   │  "));
-            Serial.print(neighbors[i].rank);
-            Serial.print(F("   │  "));
-            Serial.print(neighbors[i].rssi);
-            Serial.print(F("  │   "));
-            Serial.print((millis() - neighbors[i].last_seen) / 1000);
-            Serial.println(F("      │"));
-            count++;
-        }
-    }
+    // ──────────────────────────────────────────────────────────────────────
+    // CLEAR AGGREGATION BUFFER
+    // ──────────────────────────────────────────────────────────────────────
     
-    if (count == 0) {
-        Serial.println(F("│        (empty)                    │"));
-    }
-    Serial.println(F("└──────────┴──────┴───────┴──────────┘"));
+    memset(agg_buffer, 0, sizeof(agg_buffer));
+    agg_count = 0;
+    last_flush_time = millis();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// DEDUPLICATION
+// RADIO MODE SWITCHING (PHASE 5)
+// ════════════════════════════════════════════════════════════════════════════
+
+void switch_to_mesh_rx() {
+    // Reconfigure radio back to mesh LoRa parameters
+    radio.setFrequency(LORA_FREQUENCY);
+    radio.setSpreadingFactor(LORA_SPREADING);
+    radio.setBandwidth(LORA_BANDWIDTH);
+    radio.setCodingRate(LORA_CODING_RATE);
+    radio.setSyncWord(LORA_SYNC_WORD);
+    radio.setOutputPower(LORA_TX_POWER);
+    
+    radio.startReceive();
+    
+    Serial.println(F("[RADIO] Switched back to MESH_LISTEN mode"));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// DEDUPLICATION HELPERS
 // ════════════════════════════════════════════════════════════════════════════
 
 bool is_duplicate(uint8_t src_id, uint8_t seq_num) {
-    for (uint8_t i = 0; i < MAX_SEEN_PACKETS; i++) {
-        if (seen_packets[i].src_id == src_id && 
-            seen_packets[i].seq_num == seq_num) {
-            // Check if recent (within 30 seconds)
-            if (millis() - seen_packets[i].timestamp < 30000) {
+    uint32_t now = millis();
+    
+    for (uint8_t i = 0; i < DEDUP_TABLE_SIZE; i++) {
+        if (dedup_table[i].src_id == src_id && 
+            dedup_table[i].seq_num == seq_num) {
+            // Check if within dedup window (30s)
+            if (now - dedup_table[i].timestamp < DEDUP_WINDOW) {
                 return true;
             }
         }
     }
+    
     return false;
 }
 
 void mark_seen(uint8_t src_id, uint8_t seq_num) {
-    seen_packets[seen_index].src_id = src_id;
-    seen_packets[seen_index].seq_num = seq_num;
-    seen_packets[seen_index].timestamp = millis();
+    dedup_table[dedup_index].src_id = src_id;
+    dedup_table[dedup_index].seq_num = seq_num;
+    dedup_table[dedup_index].timestamp = millis();
     
-    seen_index = (seen_index + 1) % MAX_SEEN_PACKETS;
+    dedup_index = (dedup_index + 1) % DEDUP_TABLE_SIZE;
 }
