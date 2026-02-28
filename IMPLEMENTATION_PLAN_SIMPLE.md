@@ -57,62 +57,81 @@ If Edge 1 dies: Relay detects timeout (~35s), re-parents to Edge 2.
 | Sensor node | LilyGo T-Beam 923 MHz + DHT22 | 2 | Read temp/humidity, send to mesh |
 | Relay node | LilyGo T-Beam 923 MHz | 1 | Forward packets without reading them |
 | Edge node | LilyGo T-Beam 923 MHz | 2 | Mesh sink + LoRaWAN uplink to TTN |
-| Gateway | RAK WisGate (lab-provided) | 1 | Receives LoRaWAN, forwards to TTN |
+| Gateway | RAK WisGate (lab-provided) | 2 | Receives LoRaWAN, forwards to TTN |
 | Dashboard | Raspberry Pi Pico W | 1 | Shows data from TTN via MQTT |
 
 **All nodes are powered by USB (5V). No batteries, no sleep mode.**
 
 ### T-Beam LoRa Pin Map (Same for All 5 Nodes)
 
-These are the default SX1276 pins on the T-Beam. Confirm against your board's silk-screen before wiring.
+Your T-Beam uses the **SX1262** radio (not SX1276). The pin map is different — notably, SX1262 requires a **BUSY** pin and uses **DIO1** (not DIO0) for interrupts.
 
-| Function | GPIO |
-|----------|------|
-| NSS (CS) | 18 |
-| RST | 23 |
-| DIO0 | 26 |
-| DIO1 | 33 |
-| DIO2 | 32 |
-| SCK | 5 |
-| MISO | 19 |
-| MOSI | 27 |
+| Function | GPIO | Notes |
+|----------|------|-------|
+| NSS (CS) | 18 | SPI chip select |
+| RST | 23 | Radio reset |
+| DIO1 | 33 | Interrupt pin (replaces DIO0 on SX1276) |
+| BUSY | 32 | **Required for SX1262** — radio busy status |
+| SCK | 5 | SPI clock |
+| MISO | 19 | SPI data in |
+| MOSI | 27 | SPI data out |
+
+**Library:** Use **RadioLib** (not Arduino-LoRa). RadioLib supports SX1262 and has built-in LoRaWAN.
 
 ### CRITICAL — T-Beam Power Management (Read This First)
 
-The T-Beam has an **AXP2101 PMU** (power management chip) that controls power to the SX1276 LoRa radio. If you don't initialise it, the radio gets no power and `LoRa.begin()` will silently fail. **Every T-Beam sketch (sensor, relay, edge) must call this before anything else:**
+The T-Beam has an **AXP2101 PMU** (power management chip) that controls power to the SX1262 LoRa radio. The SX1262 is powered via the **ALDO2** rail (not DC1 as on older boards). If you don't initialise it, the radio gets no power and `radio.begin()` will silently fail. **Every T-Beam sketch (sensor, relay, edge) must call this before anything else:**
 
 ```cpp
 #include <Wire.h>
 #include <XPowersLib.h>
+#include <RadioLib.h>
 
 XPowersPMU PMU;
+
+// SX1262 pin definitions for T-Beam
+#define RADIO_NSS   18
+#define RADIO_RST   23
+#define RADIO_DIO1  33
+#define RADIO_BUSY  32
+
+SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 
 void setup() {
     Serial.begin(115200);
 
-    // --- MUST DO FIRST: Power on the LoRa radio ---
+    // --- MUST DO FIRST: Power on the LoRa radio via ALDO2 ---
     Wire.begin(21, 22);  // T-Beam I2C pins for PMU
     if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, 21, 22)) {
         Serial.println("ERROR: PMU init failed! Check board wiring.");
         while (true) delay(1000);  // halt
     }
-    PMU.setDC1Voltage(3300);  // 3.3V to SX1276
-    PMU.enableDC1();          // power on the radio
-    Serial.println("PMU OK — LoRa radio powered on");
+    PMU.setALDO2Voltage(3300);  // 3.3V to SX1262
+    PMU.enableALDO2();          // power on the radio
+    Serial.println("PMU OK — LoRa radio powered on via ALDO2");
 
-    // --- Now safe to init LoRa ---
-    LoRa.setPins(18, 23, 26);  // NSS, RST, DIO0
-    if (!LoRa.begin(923E6)) {
-        Serial.println("ERROR: LoRa init failed!");
+    delay(10);  // let radio power stabilise
+
+    // --- Now safe to init RadioLib ---
+    int state = radio.begin(923.0);  // 923 MHz for AS923
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print("ERROR: RadioLib init failed, code ");
+        Serial.println(state);
         while (true) delay(1000);
     }
-    Serial.println("LoRa OK — 923 MHz");
+    // Set SF7, 125kHz BW, CR 4/5, sync word 0x12 (private network)
+    radio.setSpreadingFactor(7);
+    radio.setBandwidth(125.0);
+    radio.setCodingRate(5);
+    radio.setSyncWord(0x12);
+    radio.setOutputPower(17);  // 17 dBm
+    Serial.println("RadioLib OK — SX1262 @ 923 MHz, SF7");
 
     // ... rest of setup
 }
 ```
 
-**If you skip this step, you will spend hours wondering why the radio doesn't work. Every team member must include this in their sketch.**
+**If you skip the PMU step, you will spend hours wondering why the radio doesn't work. Every team member must include this in their sketch.**
 
 ### DHT22 Wiring (Sensor Nodes Only)
 
@@ -261,7 +280,38 @@ payload[6] = 0x00;                      // status = OK
 
 ### Step 4 — Build MeshHeader + Send
 
-Build the 10-byte MeshHeader, append the 7-byte payload, and send via `LoRa.beginPacket()` / `LoRa.write()` / `LoRa.endPacket()`.
+Build the 10-byte MeshHeader, append the 7-byte payload, and send via RadioLib:
+
+```cpp
+uint8_t packet[17];  // 10-byte header + 7-byte payload
+
+// Fill in MeshHeader (bytes 0-9)
+packet[0] = flags;        // PKT_TYPE_DATA | ACK_REQ
+packet[1] = NODE_ID;      // src_id
+packet[2] = parent_id;    // dst_id (your current parent)
+packet[3] = NODE_ID;      // prev_hop
+packet[4] = 10;           // ttl
+packet[5] = seq_num++;    // increment each send
+packet[6] = 2;            // rank (sensor = 2)
+packet[7] = 7;            // payload_len
+
+// Compute CRC16 over bytes 0-7
+uint16_t crc = crc16(packet, 8);
+packet[8] = (crc >> 8) & 0xFF;
+packet[9] = crc & 0xFF;
+
+// Append payload (bytes 10-16)
+memcpy(&packet[10], payload, 7);
+
+// Send with RadioLib
+int state = radio.transmit(packet, 17);
+if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("TX OK");
+} else {
+    Serial.print("TX failed, code ");
+    Serial.println(state);
+}
+```
 
 Key fields to set:
 - `flags`: PKT_TYPE_DATA + ACK_REQ
@@ -283,7 +333,32 @@ delay(random(0, 2000));  // 0–2 seconds random jitter
 
 ### Step 6 — Wait for ACK
 
-After sending, switch to RX mode and wait up to **600ms** for an ACK from the next hop. If no ACK, retry up to **3 times**. If all retries fail, log the failure and wait for the next cycle.
+After sending, switch to RX mode and wait up to **600ms** for an ACK from the next hop:
+
+```cpp
+// Start listening for ACK
+radio.startReceive();
+uint32_t start = millis();
+bool ack_received = false;
+
+while (millis() - start < 600) {
+    if (radio.available()) {
+        uint8_t ack_buf[10];
+        int len = radio.readData(ack_buf, sizeof(ack_buf));
+        if (len >= 10 && is_ack_for_me(ack_buf)) {
+            ack_received = true;
+            break;
+        }
+    }
+    delay(1);
+}
+
+if (!ack_received) {
+    // Retry logic here (max 3 retries)
+}
+```
+
+If no ACK, retry up to **3 times**. If all retries fail, log the failure and wait for the next cycle.
 
 ### Step 7 — Parent Selection
 
@@ -394,7 +469,7 @@ BCN  | queue=12% | lq=85 | health=95
 
 **File:** `edge_node/edge_node.ino`
 
-This is the most complex node. The T-Beam has **one SX1276 radio** that must be time-shared between two jobs: listening for mesh packets and sending LoRaWAN uplinks.
+This is the most complex node. The T-Beam has **one SX1262 radio** that must be time-shared between two jobs: listening for mesh packets and sending LoRaWAN uplinks.
 
 ### How Time-Sharing Works
 
@@ -404,47 +479,59 @@ Normal state:   [MESH_LISTEN] ─── radio listens for incoming mesh packets 
 When flush triggers (240s elapsed or 7 records buffered):                    │
                 [MESH_LISTEN] → [LORAWAN_TXRX] → [MESH_LISTEN]              │
                                     │                                         │
-                                    ├─ Switch radio to LMIC                   │
+                                    ├─ Reconfigure radio for LoRaWAN         │
                                     ├─ Send BridgeAggV1 uplink               │
                                     ├─ Wait for RX1/RX2 windows (~5s)        │
-                                    └─ Switch radio back to mesh listen       │
+                                    └─ Reconfigure radio back to mesh        │
 ```
 
 During the LoRaWAN window (~5 seconds), the edge is deaf to mesh packets. At 120-second sensor intervals, this is fine — you will not miss anything.
 
+**Key advantage of RadioLib:** The same `SX1262` radio object is used for both raw LoRa mesh and LoRaWAN — no need for two separate libraries fighting over the hardware.
+
 ### Step 1 — PMU + LoRa Init
 
-Same as other nodes. Copy the PMU + LoRa init from the "CRITICAL" section.
+Same as other nodes. Copy the PMU + RadioLib init from the "CRITICAL" section.
 
-### Step 2 — LMIC Setup for AS923
+### Step 2 — RadioLib LoRaWAN Setup for AS923
 
-Edit `MCCI_LoRaWAN_LMIC_library/project_config/lmic_project_config.h`:
-- Comment out `#define CFG_us915 1`
-- Comment out `#define CFG_au915 1`
-- Uncomment `#define CFG_as923 1`
-
-In your sketch, define the LMIC pin map (same physical radio):
+RadioLib has built-in LoRaWAN support. No LMIC library needed.
 
 ```cpp
-#include <lmic.h>
-#include <hal/hal.h>
+#include <RadioLib.h>
 
-const lmic_pinmap lmic_pins = {
-    .nss  = 18,
-    .rxtx = LMIC_UNUSED_PIN,
-    .rst  = 23,
-    .dio  = { 26, 33, 32 },
-};
-```
+// Use the same SX1262 radio object from the CRITICAL section
+extern SX1262 radio;
 
-Set OTAA credentials from TTN (Person 4 will give you these):
+// LoRaWAN node object (wraps the radio)
+LoRaWANNode node(&radio, &AS923);
 
-```cpp
-// LSB order for DevEUI and JoinEUI, MSB order for AppKey
-static const u1_t PROGMEM DEVEUI[8]  = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const u1_t PROGMEM APPEUI[8]  = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static const u1_t PROGMEM APPKEY[16] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+// OTAA credentials from TTN (Person 4 will give you these)
+// DevEUI and JoinEUI: LSB order (reversed from TTN console display)
+// AppKey: MSB order (as TTN shows it)
+uint64_t joinEUI = 0x0000000000000000;
+uint64_t devEUI  = 0x0000000000000000;  // Get from TTN
+uint8_t appKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+bool lorawan_joined = false;
+
+void setup_lorawan() {
+    // Begin LoRaWAN with AS923 band
+    node.beginOTAA(joinEUI, devEUI, nullptr, appKey);
+    
+    // Attempt OTAA join (blocking, up to 60s)
+    Serial.println("Attempting LoRaWAN OTAA join...");
+    int state = node.activateOTAA();
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println("JOIN OK");
+        lorawan_joined = true;
+    } else {
+        Serial.print("JOIN FAILED, code ");
+        Serial.println(state);
+        // Will retry on next uplink attempt
+    }
+}
 ```
 
 ### Step 3 — Radio Arbitration (Cooperative Loop)
@@ -454,35 +541,35 @@ enum RadioMode { MESH_LISTEN, LORAWAN_TXRX };
 RadioMode radio_mode = MESH_LISTEN;
 bool uplink_pending = false;
 uint32_t lorawan_window_start = 0;
-const uint32_t LORAWAN_WINDOW_MAX_MS = 5000;  // max time in LoRaWAN mode
+const uint32_t LORAWAN_WINDOW_MAX_MS = 10000;  // max time in LoRaWAN mode
 
 void loop() {
     if (radio_mode == MESH_LISTEN) {
-        receive_mesh_packets();      // check Radio for incoming mesh frames
+        receive_mesh_packets();      // check radio for incoming mesh frames
         broadcast_beacon_if_due();   // rank-0 beacon every 10s
         check_flush_trigger();       // sets uplink_pending = true if ready
 
-        if (uplink_pending) {
-            switch_to_lorawan();     // pause mesh RX, hand radio to LMIC
+        if (uplink_pending && lorawan_joined) {
             radio_mode = LORAWAN_TXRX;
             lorawan_window_start = millis();
-        }
-    }
-
-    if (radio_mode == LORAWAN_TXRX) {
-        os_runloop_once();           // LMIC tick — always call this
-
-        bool done    = lmic_tx_complete();  // check if LMIC finished TX+RX
-        bool timeout = (millis() - lorawan_window_start) > LORAWAN_WINDOW_MAX_MS;
-
-        if (done || timeout) {
-            switch_to_mesh();        // release radio back to mesh RX
+            send_lorawan_uplink();   // blocking call, returns when done
             radio_mode = MESH_LISTEN;
+            switch_to_mesh_rx();     // reconfigure radio for mesh listening
             uplink_pending = false;
         }
     }
 
     delay(2);  // small tick delay
+}
+
+void switch_to_mesh_rx() {
+    // Reconfigure radio for raw LoRa mesh reception
+    radio.setFrequency(923.0);
+    radio.setSpreadingFactor(7);
+    radio.setBandwidth(125.0);
+    radio.setCodingRate(5);
+    radio.setSyncWord(0x12);
+    radio.startReceive();
 }
 ```
 
@@ -498,19 +585,58 @@ Then extract the useful fields and store in the aggregation buffer:
 - `src_id`, `seq_num`, `hop_estimate` (= 10 − received TTL)
 - Copy the raw payload bytes as-is
 
-### Step 5 — Aggregation + Flush
+```cpp
+void receive_mesh_packets() {
+    if (radio.available()) {
+        uint8_t buf[64];
+        int len = radio.readData(buf, sizeof(buf));
+        int rssi = radio.getRSSI();
+        
+        if (len >= 10) {
+            // Validate and process packet
+            // ... (same logic as relay: length, dedup, CRC, TTL checks)
+            
+            // Store in aggregation buffer
+            add_to_agg_buffer(buf, len, rssi);
+        }
+    }
+}
+```
+
+### Step 5 — Aggregation + Flush via RadioLib LoRaWAN
 
 Collect mesh records in a buffer (max 7 slots). Flush when either:
 - **240 seconds** have elapsed since last uplink, OR
 - **7 records** are buffered
 
-On flush, pack a `BridgeAggV1` byte array (3-byte header + 14 bytes per record) and pass it to LMIC:
+On flush, pack a `BridgeAggV1` byte array and send via RadioLib LoRaWAN:
 
 ```cpp
-LMIC_setTxData2(1, agg_buffer, agg_len, 0);  // fport=1, unconfirmed
+void send_lorawan_uplink() {
+    uint8_t agg_buffer[101];  // 3 + (7 × 14) max
+    int agg_len = pack_bridge_agg_v1(agg_buffer);
+    
+    Serial.print("UPLINK | records=");
+    Serial.print(record_count);
+    Serial.print(" | bytes=");
+    Serial.println(agg_len);
+    
+    // Send unconfirmed uplink on fport 1
+    int state = node.sendReceive(agg_buffer, agg_len, 1);
+    
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println("UPLINK OK");
+    } else if (state == RADIOLIB_ERR_RX_TIMEOUT) {
+        Serial.println("UPLINK OK (no downlink)");
+    } else {
+        Serial.print("UPLINK FAILED, code ");
+        Serial.println(state);
+    }
+    
+    // Clear aggregation buffer after uplink
+    clear_agg_buffer();
+}
 ```
-
-After LMIC finishes, clear the aggregation buffer.
 
 ### Step 6 — Broadcast Rank-0 Beacons
 
@@ -526,7 +652,7 @@ Apply phase offset: `(NODE_ID % 5) * 2000 ms` at boot.
 RX_MESH | src=03 | seq=12 | hops=2 | rssi=-68
 RX_MESH | src=04 | seq=08 | hops=2 | rssi=-71
 FLUSH   | records=2 | bytes=31
-UPLINK  | mode=LORAWAN_TXRX | duration=3200ms
+UPLINK  | records=2 | bytes=31
 JOIN    | success | devaddr=260BXXXX
 ```
 
@@ -542,6 +668,8 @@ The same firmware goes onto both Edge 1 and Edge 2. Only two things differ:
 
 ### Part A — WisGate Gateway Setup
 
+**Repeat these steps for both WisGate gateways:**
+
 1. Attach the LoRa antenna to the WisGate. **Do not power on without an antenna.**
 2. Power on via 12V adapter or PoE.
 3. Connect to the WisGate web UI:
@@ -555,10 +683,10 @@ The same firmware goes onto both Edge 1 and Edge 2. Only two things differ:
 ### Part B — TTN Console Setup
 
 1. Log into [TTN Console](https://console.cloud.thethings.network/) → select **`as1`** cluster.
-2. Register the WisGate:
-   - Gateways → Register gateway → enter Gateway EUI
+2. Register **both** WisGate gateways:
+   - Gateways → Register gateway → enter Gateway EUI (from each WisGate's label)
    - Frequency plan: **Asia 920–923 MHz (AS923 Group 1)**
-   - Verify status shows **Connected**
+   - Verify status shows **Connected** for both
 3. Create an application: `csc2106-g33-mesh`
 4. Register **two** end devices (one per edge node):
 
@@ -823,7 +951,7 @@ When writing the report, make sure these rubric criteria have dedicated sections
 | Rubric | What to write |
 |--------|--------------|
 | **Testing and Validation** | All 3 scenarios with data tables, pass/fail results |
-| **Security** | LoRaWAN AES-128 encryption on uplink (built into LMIC/TTN). Mesh layer uses CRC16 for integrity. |
+| **Security** | LoRaWAN AES-128 encryption on uplink (built into RadioLib LoRaWAN/TTN). Mesh layer uses CRC16 for integrity. |
 | **Interoperability** | LoRaWAN AS923 standard compliance. MQTT from TTN. Open payload schema. |
 | **Integration** | End-to-end path: sensor → relay → edge → WisGate → TTN → Pico W |
 | **Scalability** | Adding more sensors requires no relay firmware change — that's the whole point of payload-agnostic forwarding |
@@ -889,6 +1017,7 @@ These were in the v4 detailed spec but are **not needed** for the demo or report
 
 | Removed | Why |
 |---------|-----|
+| MCCI LMIC library | RadioLib has built-in LoRaWAN support for SX1262 — simpler, same radio object for mesh and LoRaWAN |
 | FreeRTOS dual-task edge node | Cooperative loop achieves the same result, far simpler |
 | GREEN/YELLOW/RED congestion state machine | 5 nodes at 120s intervals cannot congest. TX jitter + real beacon queue_pct is enough. |
 | provision.py + nodes.csv | `#define NODE_ID` is fine for 5 known nodes |
