@@ -150,11 +150,11 @@ Add a 10K pull-up resistor between Data and VCC.
 Hardcode these as `#define` at the top of each sketch. No provisioning system needed for 5 nodes.
 
 ```
-Edge 1 (primary):   NODE_ID = 0x01
+Edge 1:             NODE_ID = 0x01
 Relay:              NODE_ID = 0x02
 Sensor 1:           NODE_ID = 0x03
 Sensor 2:           NODE_ID = 0x04
-Edge 2 (standby):   NODE_ID = 0x06
+Edge 2:             NODE_ID = 0x05
 ```
 
 ---
