@@ -14,15 +14,9 @@ This implementation builds a two-tier underground LoRa mesh using **5 physical T
 
 | Role | Count | Hardware | Purpose |
 |------|-------|----------|---------|
-<<<<<<< Updated upstream
 | **Sensor node** | 2 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) + DHT22 | Generate telemetry, route upstream |
 | **Relay node** | 1 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) | Forward packets opaquely (payload-agnostic) |
 | **Edge bridge** | 2 | LilyGO T-BEAM-AXP2101-V1.2 (LoRA 923MHz) | Mesh sink + LoRaWAN end device uplinking to TTN |
-=======
-| **Sensor node** | 2 | LILYGO T-Beam Meshtastic (923MHz) + DHT22 | Generate telemetry, route upstream |
-| **Relay node** | 1 | LILYGO T-Beam Meshtastic (923MHz) | Forward packets opaquely (payload-agnostic) |
-| **Edge bridge node** | 2 | LILYGO T-Beam Meshtastic (923MHz) | Dual-role: mesh rank-0 sink + LoRaWAN OTAA uplink |
->>>>>>> Stashed changes
 
 1. Two sensor nodes read DHT22 (temperature + humidity) and route upstream through mesh parents.
 2. One relay node forwards packets **opaquely** — it never reads sensor payloads. This is the core payload-agnostic design.
