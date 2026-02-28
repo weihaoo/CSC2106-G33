@@ -63,7 +63,7 @@ struct ParentInfo {
 
 ParentInfo candidates[MAX_CANDIDATES];
 uint8_t current_parent_idx = 0xFF;  // 0xFF = no parent yet
-uint8_t my_rank = 255;
+uint8_t my_rank = RANK_RELAY;  // Start with design rank (1); updated to parent.rank+1 once parent found
 
 // -----------------------------------------------------------------------------
 // DEDUP TABLE (circular buffer, DEDUP_TABLE_SIZE entries, DEDUP_WINDOW_MS window)
@@ -71,6 +71,17 @@ uint8_t my_rank = 255;
 // -----------------------------------------------------------------------------
 DedupEntry dedup_table[DEDUP_TABLE_SIZE];
 uint8_t    dedup_head = 0;  // next slot to overwrite (circular)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIO1 RECEIVE INTERRUPT FLAG
+// SX1262 signals packet arrival via DIO1 interrupt, not a polled available().
+// ═══════════════════════════════════════════════════════════════════════════
+
+volatile bool rxFlag = false;
+
+void IRAM_ATTR setRxFlag() {
+    rxFlag = true;
+}
 
 // -----------------------------------------------------------------------------
 // OBJECTS
@@ -182,6 +193,8 @@ void init_radio() {
   radio.setCodingRate(LORA_CODING_RATE);
   radio.setSyncWord(LORA_SYNC_WORD);
   radio.setOutputPower(LORA_TX_POWER);
+  radio.setDio1Action(setRxFlag);
+  rxFlag = false;
   radio.startReceive();  // relay stays in RX by default
   Serial.print("RadioLib OK — SX1262 @ ");
   Serial.print(LORA_FREQUENCY, 0);
@@ -193,14 +206,25 @@ void init_radio() {
 // Called every loop iteration. Reads one packet if available and handles it.
 // =============================================================================
 void receive_and_process() {
-  if (!radio.available()) return;
+  if (!rxFlag) return;
+  rxFlag = false;
 
+  // Get actual packet length before readData
+  int len = radio.getPacketLength();
   uint8_t buf[64];
-  int len  = radio.readData(buf, sizeof(buf));
+  int state = radio.readData(buf, sizeof(buf));
   int rssi = (int)radio.getRSSI();
 
   // Restart receive immediately after reading
+  rxFlag = false;
   radio.startReceive();
+
+  // Check if readData succeeded
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("DROP | readData error, code ");
+    Serial.println(state);
+    return;
+  }
 
   // --- Validation 1: Minimum length ---
   if (len < MESH_HEADER_SIZE) {
@@ -366,6 +390,7 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
   }
 
   // Return to receive mode after ACK
+  rxFlag = false;
   radio.startReceive();
 }
 
@@ -405,6 +430,7 @@ void forward_packet(uint8_t *buf, int len) {
     // Sanity check — payload_len field claims more bytes than we received
     Serial.println("FWD  | ERROR: payload_len exceeds received packet length");
     if (pending_forwards > 0) pending_forwards--;
+    rxFlag = false;
     radio.startReceive();
     return;
   }
@@ -418,6 +444,7 @@ void forward_packet(uint8_t *buf, int len) {
   if (pending_forwards > 0) pending_forwards--;
 
   // Return to receive mode
+  rxFlag = false;
   radio.startReceive();
 }
 
@@ -490,6 +517,7 @@ void broadcast_beacon() {
     Serial.println(state);
   }
 
+  rxFlag = false;
   radio.startReceive();
 }
 

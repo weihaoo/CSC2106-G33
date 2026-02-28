@@ -49,6 +49,17 @@
 // #define DHT_TYPE DHT22
 // DHT dht(DHT_PIN, DHT_TYPE);
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DIO1 RECEIVE INTERRUPT FLAG
+// SX1262 signals packet arrival via DIO1 interrupt, not a polled available().
+// ═══════════════════════════════════════════════════════════════════════════
+
+volatile bool rxFlag = false;
+
+void IRAM_ATTR setRxFlag() {
+    rxFlag = true;
+}
+
 // -----------------------------------------------------------------------------
 // OBJECTS
 // -----------------------------------------------------------------------------
@@ -241,6 +252,7 @@ void init_radio() {
   radio.setCodingRate(LORA_CODING_RATE);
   radio.setSyncWord(LORA_SYNC_WORD);
   radio.setOutputPower(LORA_TX_POWER);
+  radio.setDio1Action(setRxFlag);
   Serial.print("RadioLib OK — SX1262 @ ");
   Serial.print(LORA_FREQUENCY, 0);
   Serial.println(" MHz, SF7");
@@ -346,6 +358,7 @@ bool send_with_ack(uint8_t *packet, uint8_t total_len) {
     }
 
     // Switch to RX and wait for ACK
+    rxFlag = false;
     radio.startReceive();
     if (wait_for_ack(ACK_TIMEOUT_MS)) {
       return true;  // ACK received
@@ -378,14 +391,17 @@ bool wait_for_ack(uint32_t timeout_ms) {
   uint8_t  ack_buf[MESH_HEADER_SIZE];
 
   while (millis() - start < timeout_ms) {
-    if (radio.available()) {
-      int len = radio.readData(ack_buf, sizeof(ack_buf));
+    if (rxFlag) {
+      rxFlag = false;
+      int len = radio.getPacketLength();
+      int state = radio.readData(ack_buf, sizeof(ack_buf));
 
       // Restart RX immediately so the radio doesn't go deaf if this
       // packet fails any check below (CRC, type, dst, src).
+      rxFlag = false;
       radio.startReceive();
 
-      if (len < MESH_HEADER_SIZE) {
+      if (state != RADIOLIB_ERR_NONE || len < MESH_HEADER_SIZE) {
         delay(1);
         continue;
       }
@@ -425,36 +441,41 @@ bool wait_for_ack(uint32_t timeout_ms) {
 // Any valid beacon packet received is processed and updates the candidate table.
 // =============================================================================
 void listen_for_beacons(uint32_t duration_ms) {
+  rxFlag = false;
   radio.startReceive();
   uint32_t start = millis();
   uint8_t  buf[64];
 
   while (millis() - start < duration_ms) {
-    if (radio.available()) {
-      int len  = radio.readData(buf, sizeof(buf));
+    if (rxFlag) {
+      rxFlag = false;
+      int len = radio.getPacketLength();
+      int state = radio.readData(buf, sizeof(buf));
       int rssi = (int)radio.getRSSI();
 
-      if (len >= MESH_HEADER_SIZE) {
-        // Validate CRC (big-endian at bytes 8-9)
-        uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
-        uint16_t computed_crc = crc16_ccitt(buf, 8);
+      // Restart receive after reading
+      rxFlag = false;
+      radio.startReceive();
 
-        if (received_crc != computed_crc) {
-          // Silently discard corrupted packets
-          radio.startReceive();
-          continue;
-        }
-
-        uint8_t flags = buf[0];
-
-        // Is this a BEACON packet?
-        if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
-          process_beacon(buf, len, rssi);
-        }
+      if (state != RADIOLIB_ERR_NONE || len < MESH_HEADER_SIZE) {
+        continue;
       }
 
-      // Restart receive after reading
-      radio.startReceive();
+      // Validate CRC (big-endian at bytes 8-9)
+      uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
+      uint16_t computed_crc = crc16_ccitt(buf, 8);
+
+      if (received_crc != computed_crc) {
+        // Silently discard corrupted packets
+        continue;
+      }
+
+      uint8_t flags = buf[0];
+
+      // Is this a BEACON packet?
+      if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
+        process_beacon(buf, len, rssi);
+      }
     }
     delay(1);
   }

@@ -31,7 +31,24 @@
 
 XPowersAXP2101 PMU;
 SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
+
+// Uncomment the next line to enable LoRaWAN join + uplink (requires real TTN credentials in config.h)
+// #define ENABLE_LORAWAN
+
+#ifdef ENABLE_LORAWAN
 LoRaWANNode lorawan_node(&radio, &AS923);  // AS923 for Singapore
+#endif
+
+// ════════════════════════════════════════════════════════════════════════════
+// DIO1 RECEIVE INTERRUPT FLAG
+// SX1262 signals packet arrival via DIO1 interrupt, not a polled available().
+// ════════════════════════════════════════════════════════════════════════════
+
+volatile bool rxFlag = false;
+
+void IRAM_ATTR setRxFlag() {
+    rxFlag = true;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // RADIO MODE (Time-sharing between mesh and LoRaWAN)
@@ -44,6 +61,7 @@ enum RadioMode {
 
 RadioMode radio_mode = MESH_LISTEN;
 bool lorawan_joined = false;
+bool lorawan_enabled = false;
 
 // ════════════════════════════════════════════════════════════════════════════
 // AGGREGATION BUFFER (stores up to 7 sensor readings)
@@ -146,13 +164,18 @@ void setup() {
     Serial.print(LORA_BANDWIDTH);
     Serial.println(F(" kHz"));
     
+    // Set up DIO1 interrupt for non-blocking receive
+    radio.setDio1Action(setRxFlag);
+    
     // Start receiving mesh packets
+    rxFlag = false;
     radio.startReceive();
     
     // ──────────────────────────────────────────────────────────────────────
-    // PHASE 3: LORAWAN OTAA JOIN
+    // PHASE 3: LORAWAN OTAA JOIN (only if ENABLE_LORAWAN is defined)
     // ──────────────────────────────────────────────────────────────────────
     
+#ifdef ENABLE_LORAWAN
     Serial.println(F("\n[INIT] Starting LoRaWAN OTAA join..."));
     Serial.print(F("     DevEUI: "));
     Serial.println((unsigned long)DEV_EUI, HEX);
@@ -177,8 +200,13 @@ void setup() {
         Serial.println(F("     Will retry on next uplink attempt"));
     }
     
+    lorawan_enabled = true;
     // Switch radio back to mesh mode after join
     switch_to_mesh_rx();
+#else
+    Serial.println(F("\n[INIT] LoRaWAN DISABLED (mesh-only testing mode)"));
+    
+#endif
     
     // ──────────────────────────────────────────────────────────────────────
     // INITIALIZATION COMPLETE
@@ -215,7 +243,7 @@ void loop() {
         bool timeout_flush = (now - last_flush_time >= AGG_FLUSH_TIMEOUT_MS);
         bool buffer_flush = (agg_count >= MAX_AGG_RECORDS);
         
-        if ((timeout_flush || buffer_flush) && agg_count > 0 && lorawan_joined) {
+        if ((timeout_flush || buffer_flush) && agg_count > 0 && lorawan_joined && lorawan_enabled) {
             // Switch to LoRaWAN mode to send uplink
             Serial.println(F("\n[FLUSH] Trigger detected, switching to LoRaWAN mode"));
             radio_mode = LORAWAN_TXRX;
@@ -239,19 +267,30 @@ void loop() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void receive_mesh_packets() {
-    // Check if packet available (non-blocking)
-    if (!radio.available()) {
+    // Check if DIO1 interrupt fired (packet arrived)
+    if (!rxFlag) {
         return;
     }
+    rxFlag = false;
     
+    // Get the actual packet length BEFORE readData
+    int len = radio.getPacketLength();
     uint8_t buf[128];
-    int len = radio.readData(buf, sizeof(buf));
+    int state = radio.readData(buf, sizeof(buf));
     int rssi = radio.getRSSI();
     float snr = radio.getSNR();
 
     // Restart RX immediately so the radio doesn't sit in standby while we
     // process (or drop) this packet. Mirrors the relay_node pattern.
+    rxFlag = false;
     radio.startReceive();
+    
+    // Check if readData succeeded
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.print(F("[DROP] readData error, code "));
+        Serial.println(state);
+        return;
+    }
 
     packets_received++;
     
@@ -408,6 +447,7 @@ void broadcast_beacon_if_due() {
     }
     
     last_beacon_time = millis();
+    rxFlag = false;
     radio.startReceive();  // Return to RX mode
 }
 
@@ -493,6 +533,7 @@ void send_ack(uint8_t to_node, uint8_t seq) {
         Serial.println(seq);
     }
     
+    rxFlag = false;
     radio.startReceive();  // Return to RX mode
 }
 
@@ -584,6 +625,7 @@ void switch_to_mesh_rx() {
     radio.setSyncWord(LORA_SYNC_WORD);
     radio.setOutputPower(LORA_TX_POWER);
     
+    rxFlag = false;
     radio.startReceive();
     
     Serial.println(F("[RADIO] Switched back to MESH_LISTEN mode"));
