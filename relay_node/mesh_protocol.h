@@ -1,6 +1,10 @@
 // ════════════════════════════════════════════════════════════════════════════
-// MESH PROTOCOL HEADER
-// Common definitions for all nodes in the LoRa mesh network
+// MESH PROTOCOL DEFINITIONS — CANONICAL (all nodes share this file)
+// CSC2106 Group 33 — LoRa Mesh Network
+//
+// Copy this file verbatim into sensor_node/, relay_node/, and edge_node/.
+// Do NOT add node-specific constants here — those belong in each .ino or
+// the edge node's config.h.
 // ════════════════════════════════════════════════════════════════════════════
 
 #ifndef MESH_PROTOCOL_H
@@ -9,124 +13,221 @@
 #include <Arduino.h>
 
 // ════════════════════════════════════════════════════════════════════════════
-// CONFIGURATION
+// LORA RADIO PARAMETERS (AS923, Singapore — all nodes must match exactly)
 // ════════════════════════════════════════════════════════════════════════════
 
-#define LORA_FREQUENCY      915E6   // 915 MHz (change to 868E6 for EU)
+#define LORA_FREQUENCY      923.0   // MHz (AS923 for Singapore)
 #define LORA_SPREADING      7       // SF7
-#define LORA_BANDWIDTH      125E3   // 125 kHz
+#define LORA_BANDWIDTH      125.0   // kHz
+#define LORA_CODING_RATE    5       // 4/5
+#define LORA_SYNC_WORD      0x12    // Private network sync word
 #define LORA_TX_POWER       17      // dBm
 
-#define MAX_NEIGHBORS       8
-#define MAX_PENDING_ACKS    4
-#define MAX_SEEN_PACKETS    16
-
-#define BEACON_INTERVAL     10000   // 10 seconds
-#define SENSOR_INTERVAL     15000   // 15 seconds
-#define ACK_TIMEOUT         1000    // 1 second
-#define PARENT_TIMEOUT      35000   // 35 seconds (miss 3 beacons)
-#define MAX_RETRIES         3
-#define DEFAULT_TTL         10
-
-// Parent selection weights (total = 100)
-#define RANK_WEIGHT         60
-#define RSSI_WEIGHT         40
-#define RSSI_HYSTERESIS     10      // dB improvement needed to switch
-
 // ════════════════════════════════════════════════════════════════════════════
-// PACKET TYPES
+// PROTOCOL TIMING CONSTANTS (shared across all nodes)
 // ════════════════════════════════════════════════════════════════════════════
 
-#define PKT_TYPE_DATA       0x00    // Sensor data
-#define PKT_TYPE_ACK        0x20    // Acknowledgment
-#define PKT_TYPE_BEACON     0x40    // Neighbor discovery
-#define PKT_TYPE_RELAY      0x60    // LoRaWAN relay (version-agnostic)
+#define BEACON_INTERVAL_MS       10000UL   // How often nodes broadcast beacons
+#define ACK_TIMEOUT_MS           600       // How long to wait for a hop ACK
+#define PARENT_TIMEOUT_MS        35000UL   // Declare parent dead after this (3+ missed beacons)
+#define MAX_RETRIES              3         // Max TX attempts per packet
+#define DEFAULT_TTL              10        // Starting TTL (max hops)
+#define DEDUP_WINDOW_MS          30000UL   // Ignore duplicate packets within this window
+#define DEDUP_TABLE_SIZE         16        // Max recent packets tracked for dedup
+#define MAX_CANDIDATES           4         // Max parent candidates tracked by sensor/relay
+#define PARENT_SWITCH_HYSTERESIS 8         // Min score improvement needed to switch parent
 
-#define PKT_FLAG_ACK_REQ    0x10    // Request ACK
-#define PKT_FLAG_IS_FWD     0x08    // Is forwarded (not original)
-
-// ════════════════════════════════════════════════════════════════════════════
-// NODE ROLES
-// ════════════════════════════════════════════════════════════════════════════
-
-#define ROLE_SENSOR         0       // Mesh sensor node
-#define ROLE_RELAY          1       // Mesh relay node
-#define ROLE_SINK           2       // Edge node / sink
+// Edge node aggregation
+#define MAX_AGG_RECORDS          7         // Max sensor readings per LoRaWAN uplink
+#define AGG_FLUSH_TIMEOUT_MS     240000UL  // Flush to TTN after 4 minutes regardless
 
 // ════════════════════════════════════════════════════════════════════════════
-// NODE STATES
+// NODE RANK VALUES
+// Rank 0 = closest to TTN (edge), higher = further away
 // ════════════════════════════════════════════════════════════════════════════
 
-#define STATE_ORPHAN        0       // No parent, rank = 255
-#define STATE_DISCOVERING   1       // Heard beacon, selecting parent
-#define STATE_CONNECTED     2       // Has parent, can route
-#define STATE_SWITCHING     3       // Parent failed, finding new
+#define RANK_EDGE       0   // Edge node (sink, LoRaWAN gateway)
+#define RANK_RELAY      1   // Relay node (payload-agnostic forwarder)
+#define RANK_SENSOR     2   // Sensor node (data originator)
 
 // ════════════════════════════════════════════════════════════════════════════
-// MESH HEADER (8 bytes)
+// PACKET TYPE FLAGS (stored in flags byte, bits 7–5)
+// ════════════════════════════════════════════════════════════════════════════
+
+#define PKT_TYPE_DATA       0x00    // Sensor data packet
+#define PKT_TYPE_BEACON     0x20    // Beacon packet (parent discovery)
+#define PKT_TYPE_ACK        0x40    // Acknowledgment packet
+#define PKT_TYPE_RESERVED   0x60    // Reserved
+
+#define PKT_FLAG_ACK_REQ    0x10    // Bit 4: ACK requested by sender
+#define PKT_FLAG_FWD        0x08    // Bit 3: Packet has been forwarded (relay set this)
+
+// Helper macros
+#define GET_PKT_TYPE(flags)      ((flags) & 0xE0)
+#define IS_ACK_REQUESTED(flags)  (((flags) & PKT_FLAG_ACK_REQ) != 0)
+#define IS_FORWARDED(flags)      (((flags) & PKT_FLAG_FWD) != 0)
+
+// ════════════════════════════════════════════════════════════════════════════
+// MESH HEADER — 10 BYTES
+//
+// Byte layout:
+//   [0] flags       — packet type (bits 7–5) + flags (bits 4–0)
+//   [1] src_id      — original sender node ID
+//   [2] dst_id      — destination node ID (0xFF = broadcast)
+//   [3] prev_hop    — node ID of the last hop that touched this packet
+//   [4] ttl         — time to live, decremented each hop, drop at 0
+//   [5] seq_num     — sequence number from original sender (for dedup)
+//   [6] rank        — sender's rank (0=edge, 1=relay, 2=sensor)
+//   [7] payload_len — bytes following this header
+//   [8] crc16[0]    — CRC16 high byte (big-endian, covers bytes 0–7)
+//   [9] crc16[1]    — CRC16 low byte
+//
+// IMPORTANT: crc16 is stored as uint8_t[2] in big-endian order to ensure
+// identical byte layout on all platforms regardless of CPU endianness.
 // ════════════════════════════════════════════════════════════════════════════
 
 typedef struct __attribute__((packed)) {
-    uint8_t flags;          // [Type:3][ACK_REQ:1][IS_FWD:1][Reserved:3]
-    uint8_t src_id;         // Original source node
-    uint8_t dst_id;         // Destination (0x00 = any sink)
-    uint8_t prev_hop;       // Previous hop node
-    uint8_t ttl;            // Time to live
-    uint8_t seq_num;        // Sequence number
-    uint8_t rank;           // Sender's rank
-    uint8_t payload_len;    // Payload length
+    uint8_t flags;
+    uint8_t src_id;
+    uint8_t dst_id;
+    uint8_t prev_hop;
+    uint8_t ttl;
+    uint8_t seq_num;
+    uint8_t rank;
+    uint8_t payload_len;
+    uint8_t crc16[2];   // [0]=high byte, [1]=low byte (explicit big-endian)
 } MeshHeader;
 
+#define MESH_HEADER_SIZE 10
+
 // ════════════════════════════════════════════════════════════════════════════
-// NEIGHBOR TABLE ENTRY (8 bytes - optimized for Arduino)
+// SENSOR PAYLOAD — 7 BYTES (DHT22 temperature + humidity reading)
+//
+// Byte layout:
+//   [0] schema_version — 0x01
+//   [1] sensor_type    — 0x03 = DHT22
+//   [2–3] temp_c_x10   — temperature × 10, signed int16, big-endian
+//                         (e.g. 253 = 25.3°C, -12 = -1.2°C)
+//   [4–5] humidity_x10 — humidity × 10, unsigned int16, big-endian
+//                         (e.g. 655 = 65.5%)
+//   [6] status         — 0x00 = OK, 0x01 = read error (discard this reading)
+//
+// NOTE: Use manual byte packing (not struct cast) to guarantee big-endian
+// layout on any platform.
+// ════════════════════════════════════════════════════════════════════════════
+
+typedef struct __attribute__((packed)) {
+    uint8_t  schema_version;  // 0x01
+    uint8_t  sensor_type;     // 0x03 = DHT22
+    int16_t  temp_c_x10;      // Temperature × 10 (signed)
+    uint16_t humidity_x10;    // Humidity × 10 (unsigned)
+    uint8_t  status;          // 0x00 = OK, 0x01 = read error
+} SensorPayload;
+
+#define SENSOR_PAYLOAD_SIZE 7
+#define SENSOR_TYPE_DHT22   0x03
+
+// ════════════════════════════════════════════════════════════════════════════
+// BEACON PAYLOAD — 4 BYTES
+//
+// Byte layout:
+//   [0] schema_version — 0x01
+//   [1] queue_pct      — TX queue occupancy 0–100%
+//   [2] link_quality   — RSSI-derived uplink quality 0–100
+//   [3] parent_health  — ACK success rate to parent 0–100%
+// ════════════════════════════════════════════════════════════════════════════
+
+typedef struct __attribute__((packed)) {
+    uint8_t schema_version;
+    uint8_t queue_pct;
+    uint8_t link_quality;
+    uint8_t parent_health;
+} BeaconPayload;
+
+#define BEACON_PAYLOAD_SIZE 4
+
+// ════════════════════════════════════════════════════════════════════════════
+// BRIDGE AGGREGATION V1 FORMAT (edge node → TTN via LoRaWAN)
+//
+// Header (3 bytes):
+//   [0] schema_version — 0x02 = BridgeAggV1
+//   [1] bridge_id      — edge node ID (0x01 or 0x06)
+//   [2] record_count   — number of records following (max 7)
+//
+// Each record (14 bytes):
+//   [0]   mesh_src_id     — original sensor node ID
+//   [1]   mesh_seq        — packet sequence number from sensor
+//   [2]   sensor_type_hint— 0x03 = DHT22
+//   [3]   hop_estimate    — estimated hops (DEFAULT_TTL - received_ttl)
+//   [4–5] edge_uptime_s   — edge node uptime when received (big-endian uint16)
+//   [6]   opaque_len      — payload length (always 7 for DHT22)
+//   [7–13] opaque_payload — raw 7-byte SensorPayload, copied as-is
+// ════════════════════════════════════════════════════════════════════════════
+
+typedef struct __attribute__((packed)) {
+    uint8_t schema_version;
+    uint8_t bridge_id;
+    uint8_t record_count;
+} BridgeAggHeader;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  mesh_src_id;
+    uint8_t  mesh_seq;
+    uint8_t  sensor_type_hint;
+    uint8_t  hop_estimate;
+    uint16_t edge_uptime_s;
+    uint8_t  opaque_len;
+    uint8_t  opaque_payload[7];
+} BridgeRecord;
+
+#define BRIDGE_RECORD_SIZE   14
+#define BRIDGE_AGG_SCHEMA_V1 0x02
+
+// ════════════════════════════════════════════════════════════════════════════
+// DEDUPLICATION ENTRY (used by relay and edge)
 // ════════════════════════════════════════════════════════════════════════════
 
 typedef struct {
-    uint8_t node_id;        // Neighbor node ID (0 = empty slot)
-    uint8_t rank;           // Neighbor's rank
-    int8_t rssi;            // Last RSSI
-    uint8_t fail_count;     // Consecutive failures
-    uint32_t last_seen;     // Timestamp of last beacon (millis)
-} Neighbor;
+    uint8_t  src_id;
+    uint8_t  seq_num;
+    uint32_t timestamp;  // millis() when first seen
+    bool     valid;      // slot is in use
+} DedupEntry;
 
 // ════════════════════════════════════════════════════════════════════════════
-// PENDING ACK ENTRY
+// CRC16-CCITT (polynomial 0x1021, initial value 0xFFFF)
+// Computed over the first `len` bytes of `data`.
 // ════════════════════════════════════════════════════════════════════════════
 
-typedef struct {
-    uint8_t seq_num;        // Sequence number waiting for ACK
-    uint8_t dest_id;        // Who should ACK
-    uint8_t retries;        // Retry count
-    uint32_t sent_time;     // When packet was sent
-    uint8_t payload[32];    // Payload backup for retry
-    uint8_t payload_len;    // Payload length
-    bool active;            // Slot in use
-} PendingAck;
-
-// ════════════════════════════════════════════════════════════════════════════
-// SEEN PACKET (for deduplication)
-// ════════════════════════════════════════════════════════════════════════════
-
-typedef struct {
-    uint8_t src_id;
-    uint8_t seq_num;
-    uint32_t timestamp;
-} SeenPacket;
-
-// ════════════════════════════════════════════════════════════════════════════
-// UTILITY FUNCTIONS
-// ════════════════════════════════════════════════════════════════════════════
-
-inline uint8_t get_packet_type(uint8_t flags) {
-    return flags & 0xE0;
+inline uint16_t crc16_ccitt(const uint8_t* data, uint8_t len) {
+    uint16_t crc = 0xFFFF;
+    for (uint8_t i = 0; i < len; i++) {
+        crc ^= ((uint16_t)data[i]) << 8;
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
 }
 
-inline bool is_ack_requested(uint8_t flags) {
-    return (flags & PKT_FLAG_ACK_REQ) != 0;
+// Compute CRC16 over bytes 0–7 and write it big-endian into hdr->crc16[0..1].
+// Call this after filling all other header fields.
+inline void set_mesh_crc(MeshHeader* hdr) {
+    uint16_t crc = crc16_ccitt((const uint8_t*)hdr, 8);
+    hdr->crc16[0] = (crc >> 8) & 0xFF;  // high byte first
+    hdr->crc16[1] = crc & 0xFF;          // low byte second
 }
 
-inline bool is_forwarded(uint8_t flags) {
-    return (flags & PKT_FLAG_IS_FWD) != 0;
+// Validate MeshHeader CRC. Reads the stored big-endian value and compares to
+// freshly computed CRC. Returns true if the packet is intact.
+inline bool validate_mesh_crc(const MeshHeader* hdr) {
+    uint16_t computed = crc16_ccitt((const uint8_t*)hdr, 8);
+    uint16_t stored   = ((uint16_t)hdr->crc16[0] << 8) | hdr->crc16[1];
+    return (computed == stored);
 }
 
 #endif // MESH_PROTOCOL_H

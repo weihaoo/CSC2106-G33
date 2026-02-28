@@ -66,32 +66,24 @@
 #define PMU_SCL     22
 
 // ════════════════════════════════════════════════════════════════════════════
-// LORA MESH PARAMETERS (AS923 for Singapore)
+// LORA MESH PARAMETERS
+// Radio constants (LORA_FREQUENCY, LORA_SPREADING, etc.) are defined in
+// mesh_protocol.h which is shared across all nodes.
 // ════════════════════════════════════════════════════════════════════════════
-
-#define LORA_FREQUENCY      923.0       // MHz (AS923)
-#define LORA_SPREADING      7           // SF7 (fastest, good for lab)
-#define LORA_BANDWIDTH      125.0       // kHz
-#define LORA_CODING_RATE    5           // 4/5
-#define LORA_TX_POWER       17          // dBm
-#define LORA_SYNC_WORD      0x12        // Private network
 
 // ════════════════════════════════════════════════════════════════════════════
 // MESH PROTOCOL PARAMETERS
+// Timing constants (BEACON_INTERVAL_MS, DEDUP_WINDOW_MS, etc.) are defined
+// in mesh_protocol.h which is shared across all nodes.
 // ════════════════════════════════════════════════════════════════════════════
 
-#define MY_RANK             0           // Edge nodes are always rank 0
-#define BEACON_INTERVAL     10000       // 10 seconds
-#define ACK_TIMEOUT         600         // 600ms to wait for ACK
-#define DEDUP_WINDOW        30000       // 30s deduplication window
-#define DEDUP_TABLE_SIZE    16          // Max recent packets to track
+#define MY_RANK             0           // Edge nodes are always rank 0 (RANK_EDGE in mesh_protocol.h)
 
 // ════════════════════════════════════════════════════════════════════════════
-// AGGREGATION & LORAWAN UPLINK PARAMETERS
+// LORAWAN UPLINK PARAMETERS (edge-node specific)
+// MAX_AGG_RECORDS and AGG_FLUSH_TIMEOUT_MS are in mesh_protocol.h
 // ════════════════════════════════════════════════════════════════════════════
 
-#define MAX_AGG_RECORDS     7           // Max 7 sensor readings per uplink
-#define AGG_FLUSH_TIMEOUT   240000      // 240s = 4 minutes
 #define LORAWAN_FPORT       1           // TTN uplink port
 
 // ════════════════════════════════════════════════════════════════════════════
