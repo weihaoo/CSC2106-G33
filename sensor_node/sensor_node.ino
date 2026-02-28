@@ -26,10 +26,13 @@
 // -----------------------------------------------------------------------------
 // PACKET FLAGS
 // -----------------------------------------------------------------------------
-#define PKT_TYPE_DATA   0x00  // Bit 0 = 0 → DATA packet
-#define PKT_TYPE_BEACON 0x01  // Bit 0 = 1 → BEACON packet
-#define FLAG_ACK_REQ    0x02  // Bit 1 → sender requests hop ACK
-#define FLAG_FWD        0x04  // Bit 2 → set by relay when forwarding
+#define PKT_TYPE_DATA       0x00
+#define PKT_TYPE_BEACON     0x20
+#define FLAG_ACK_REQ        0x10
+#define FLAG_FWD            0x08
+
+#define GET_PKT_TYPE(flags)     ((flags) & 0xE0)
+#define IS_ACK_REQUESTED(flags) (((flags) & FLAG_ACK_REQ) != 0)
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS
@@ -423,10 +426,9 @@ bool wait_for_ack(uint32_t timeout_ms) {
       uint8_t src_id  = ack_buf[1];
       uint8_t dst_id  = ack_buf[2];
 
-      // Check: is this an ACK addressed to us?
-      // An ACK has no FLAG_ACK_REQ set, dst_id == NODE_ID, src_id == our parent
-      bool is_data_pkt  = ((flags & 0x01) == PKT_TYPE_DATA);
-      bool no_ack_req   = ((flags & FLAG_ACK_REQ) == 0);
+      
+      bool is_data_pkt = (GET_PKT_TYPE(flags) == PKT_TYPE_DATA);
+      bool no_ack_req  = ((flags & FLAG_ACK_REQ) == 0);
       bool addressed_to_me = (dst_id == NODE_ID);
       bool from_parent  = (src_id == get_parent_id());
 
@@ -469,7 +471,7 @@ void listen_for_beacons(uint32_t duration_ms) {
         uint8_t flags = buf[0];
 
         // Is this a BEACON packet?
-        if ((flags & 0x01) == PKT_TYPE_BEACON) {
+        if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
           process_beacon(buf, len, rssi);
         }
       }

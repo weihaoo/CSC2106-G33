@@ -29,7 +29,7 @@
 // HARDWARE OBJECTS
 // ════════════════════════════════════════════════════════════════════════════
 
-XPowersPMU PMU;
+XPowersAXP2101 PMU;
 SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 LoRaWANNode lorawan_node(&radio, &AS923);  // AS923 for Singapore
 

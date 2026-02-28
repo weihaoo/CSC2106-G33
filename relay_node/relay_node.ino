@@ -32,10 +32,13 @@
 // -----------------------------------------------------------------------------
 // PACKET FLAGS (must match sensor_node.ino exactly)
 // -----------------------------------------------------------------------------
-#define PKT_TYPE_DATA   0x00  // Bit 0 = 0 → DATA packet
-#define PKT_TYPE_BEACON 0x01  // Bit 0 = 1 → BEACON packet
-#define FLAG_ACK_REQ    0x02  // Bit 1 → sender requests hop ACK
-#define FLAG_FWD        0x04  // Bit 2 → set by relay when forwarding
+#define PKT_TYPE_DATA       0x00
+#define PKT_TYPE_BEACON     0x20
+#define FLAG_ACK_REQ        0x10
+#define FLAG_FWD            0x08
+
+#define GET_PKT_TYPE(flags)     ((flags) & 0xE0)
+#define IS_ACK_REQUESTED(flags) (((flags) & FLAG_ACK_REQ) != 0)
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS
@@ -266,7 +269,7 @@ void receive_and_process() {
   }
 
   // --- Check if this is a beacon from an edge node ---
-  if ((flags & 0x01) == PKT_TYPE_BEACON) {
+  if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
     // Only accept beacons from edge nodes (rank 0)
     if (rank < my_rank) {  // only accept beacons from nodes closer to edge than us
         process_beacon(buf, len, rssi);
