@@ -16,32 +16,20 @@
 #include <Wire.h>
 #include <XPowersLib.h>
 #include <RadioLib.h>
+#include "mesh_protocol.h"
 
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION — Change before flashing!
 // -----------------------------------------------------------------------------
 #define NODE_ID       0x03    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
-
 // -----------------------------------------------------------------------------
-// PACKET FLAGS
-// -----------------------------------------------------------------------------
-#define PKT_TYPE_DATA       0x00
-#define PKT_TYPE_BEACON     0x20
-#define FLAG_ACK_REQ        0x10
-#define FLAG_FWD            0x08
-
-#define GET_PKT_TYPE(flags)     ((flags) & 0xE0)
-#define IS_ACK_REQUESTED(flags) (((flags) & FLAG_ACK_REQ) != 0)
-
-// -----------------------------------------------------------------------------
-// TIMING PARAMETERS
+// TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
 // -----------------------------------------------------------------------------
 #define TX_INTERVAL_MS        30000UL   // 30s during development (change to 120000UL for final)
-#define BEACON_TIMEOUT_MS     35000UL   // declare parent dead after 35s of no beacons
-#define ACK_TIMEOUT_MS        600       // wait up to 600ms for hop ACK
-#define MAX_RETRIES           3         // max TX retries per packet
-#define PARENT_SWITCH_HYSTERESIS 8      // min score improvement to switch parent
+
+// Beacon phase offset — spreads beacons/transmissions to avoid collisions
+#define TX_PHASE_OFFSET_MS    ((NODE_ID % 5) * 2000UL)
 
 // -----------------------------------------------------------------------------
 // LoRa RADIO PINS (T-Beam SX1262)
@@ -79,8 +67,7 @@ struct ParentInfo {
   bool     valid;         // have we ever heard from this parent?
 };
 
-// Candidate table — we track up to 4 potential parents (relay + 2 edges + spare)
-#define MAX_CANDIDATES 4
+// Candidate table — we track up to MAX_CANDIDATES potential parents
 ParentInfo candidates[MAX_CANDIDATES];
 uint8_t current_parent_idx = 0xFF;  // index into candidates[], 0xFF = none yet
 
@@ -96,7 +83,6 @@ void     init_pmu();
 void     init_radio();
 bool     read_sensor(float &temp, float &hum);
 void     build_sensor_payload(uint8_t *payload, float temp, float hum, bool sensor_ok);
-uint16_t crc16(const uint8_t *data, size_t len);
 void     build_mesh_header(uint8_t *packet, uint8_t dst_id, uint8_t payload_len);
 bool     send_with_ack(uint8_t *packet, uint8_t total_len);
 void     listen_for_beacons(uint32_t duration_ms);
@@ -175,13 +161,13 @@ void loop() {
     }
 
     // --- Build payload ---
-    uint8_t payload[7];
+    uint8_t payload[SENSOR_PAYLOAD_SIZE];
     build_sensor_payload(payload, temp, hum, sensor_ok);
 
     // --- Build full packet (10-byte header + 7-byte payload) ---
-    uint8_t packet[17];
-    build_mesh_header(packet, get_parent_id(), 7);
-    memcpy(&packet[10], payload, 7);
+    uint8_t packet[MESH_HEADER_SIZE + SENSOR_PAYLOAD_SIZE];
+    build_mesh_header(packet, get_parent_id(), SENSOR_PAYLOAD_SIZE);
+    memcpy(&packet[MESH_HEADER_SIZE], payload, SENSOR_PAYLOAD_SIZE);
 
     // --- Apply TX jitter (0–2000ms) ---
     uint32_t jitter = random(0, 2000);
@@ -191,7 +177,7 @@ void loop() {
     delay(jitter);
 
     // --- Send with ACK + retry ---
-    bool success = send_with_ack(packet, 17);
+    bool success = send_with_ack(packet, MESH_HEADER_SIZE + SENSOR_PAYLOAD_SIZE);
 
     if (success) {
       Serial.print("TX | node=");
@@ -241,20 +227,23 @@ void init_pmu() {
 
 // =============================================================================
 // RADIO INITIALISATION
+// Uses shared radio constants from mesh_protocol.h.
 // =============================================================================
 void init_radio() {
-  int state = radio.begin(923.0);
+  int state = radio.begin(LORA_FREQUENCY);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.print("ERROR: RadioLib init failed, code ");
     Serial.println(state);
     while (true) delay(1000);
   }
-  radio.setSpreadingFactor(7);
-  radio.setBandwidth(125.0);
-  radio.setCodingRate(5);
-  radio.setSyncWord(0x12);      // private network sync word
-  radio.setOutputPower(17);     // 17 dBm
-  Serial.println("RadioLib OK — SX1262 @ 923 MHz, SF7");
+  radio.setSpreadingFactor(LORA_SPREADING);
+  radio.setBandwidth(LORA_BANDWIDTH);
+  radio.setCodingRate(LORA_CODING_RATE);
+  radio.setSyncWord(LORA_SYNC_WORD);
+  radio.setOutputPower(LORA_TX_POWER);
+  Serial.print("RadioLib OK — SX1262 @ ");
+  Serial.print(LORA_FREQUENCY, 0);
+  Serial.println(" MHz, SF7");
 }
 
 // =============================================================================
@@ -279,9 +268,9 @@ bool read_sensor(float &temp, float &hum) {
 }
 
 // =============================================================================
-// BUILD SENSOR PAYLOAD (7 bytes)
+// BUILD SENSOR PAYLOAD (SENSOR_PAYLOAD_SIZE = 7 bytes)
 //
-// Byte layout:
+// Byte layout (big-endian integers — matches SensorPayload struct definition):
 //   [0] schema_version = 0x01
 //   [1] sensor_type    = 0x03 (DHT22)
 //   [2-3] temp_c_x10   (signed int16, big-endian)
@@ -293,7 +282,7 @@ void build_sensor_payload(uint8_t *payload, float temp, float hum, bool sensor_o
   uint16_t hum_x10  = (uint16_t)(hum * 10.0);
 
   payload[0] = 0x01;                        // schema_version
-  payload[1] = 0x03;                        // sensor_type = DHT22
+  payload[1] = SENSOR_TYPE_DHT22;           // sensor_type = DHT22
   payload[2] = (temp_x10 >> 8) & 0xFF;     // temp high byte
   payload[3] = temp_x10 & 0xFF;             // temp low byte
   payload[4] = (hum_x10 >> 8) & 0xFF;      // humidity high byte
@@ -302,49 +291,33 @@ void build_sensor_payload(uint8_t *payload, float temp, float hum, bool sensor_o
 }
 
 // =============================================================================
-// CRC16-CCITT (polynomial 0x1021, initial value 0xFFFF)
-// Computed over the first `len` bytes of `data`.
-// =============================================================================
-uint16_t crc16(const uint8_t *data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; i++) {
-    crc ^= ((uint16_t)data[i] << 8);
-    for (uint8_t bit = 0; bit < 8; bit++) {
-      if (crc & 0x8000) {
-        crc = (crc << 1) ^ 0x1021;
-      } else {
-        crc <<= 1;
-      }
-    }
-  }
-  return crc;
-}
-
-// =============================================================================
-// BUILD MESH HEADER (10 bytes) into packet[0..9]
+// BUILD MESH HEADER (MESH_HEADER_SIZE = 10 bytes) into packet[0..9]
+//
+// Uses crc16_ccitt() and set_mesh_crc() from mesh_protocol.h.
 //
 // Byte layout:
-//   [0] flags        PKT_TYPE_DATA | FLAG_ACK_REQ
+//   [0] flags        PKT_TYPE_DATA | PKT_FLAG_ACK_REQ
 //   [1] src_id       NODE_ID
 //   [2] dst_id       parent node ID
 //   [3] prev_hop     NODE_ID (sensor is always the first hop)
-//   [4] ttl          10
+//   [4] ttl          DEFAULT_TTL
 //   [5] seq_num      incremented each call
-//   [6] rank         2 (sensor rank)
+//   [6] rank         RANK_SENSOR (2)
 //   [7] payload_len
-//   [8-9] crc16      over bytes 0–7
+//   [8-9] crc16      big-endian, over bytes 0–7
 // =============================================================================
 void build_mesh_header(uint8_t *packet, uint8_t dst_id, uint8_t payload_len) {
-  packet[0] = PKT_TYPE_DATA | FLAG_ACK_REQ;
+  packet[0] = PKT_TYPE_DATA | PKT_FLAG_ACK_REQ;
   packet[1] = NODE_ID;
   packet[2] = dst_id;
-  packet[3] = NODE_ID;      // prev_hop = self (first hop)
-  packet[4] = 10;           // ttl
-  packet[5] = seq_num++;    // increment sequence number
-  packet[6] = 2;            // rank = 2 (will not be used by any node for decision)
+  packet[3] = NODE_ID;         // prev_hop = self (first hop)
+  packet[4] = DEFAULT_TTL;     // ttl
+  packet[5] = seq_num++;       // increment sequence number
+  packet[6] = RANK_SENSOR;     // rank = 2
   packet[7] = payload_len;
 
-  uint16_t crc = crc16(packet, 8);
+  // Write CRC big-endian at bytes 8-9
+  uint16_t crc = crc16_ccitt(packet, 8);
   packet[8] = (crc >> 8) & 0xFF;
   packet[9] = crc & 0xFF;
 }
@@ -387,35 +360,39 @@ bool send_with_ack(uint8_t *packet, uint8_t total_len) {
 // =============================================================================
 // WAIT FOR ACK
 // Listens on the radio for up to `timeout_ms` milliseconds.
-// Returns true if a valid ACK addressed to this node is received.
+// Returns true if a valid ACK (PKT_TYPE_ACK) addressed to this node is received.
 //
-// ACK packet format (10 bytes minimum):
-//   [0] flags   — must have PKT_TYPE_DATA, no FLAG_ACK_REQ (it's the reply)
+// ACK packet format (10 bytes):
+//   [0] flags   — must be PKT_TYPE_ACK (0x40)
 //   [1] src_id  — the node sending the ACK (our parent)
-//   [2] dst_id  — must match NODE_ID (the ACK is for us)
+//   [2] dst_id  — must match NODE_ID
 //   [3] prev_hop
 //   [4] ttl
-//   [5] seq_num — should match the seq we just sent (seq_num - 1)
+//   [5] seq_num — echoes back the seq we just sent
 //   [6] rank
 //   [7] payload_len — 0 for a pure ACK
 //   [8-9] crc16
 // =============================================================================
 bool wait_for_ack(uint32_t timeout_ms) {
   uint32_t start = millis();
-  uint8_t  ack_buf[10];
+  uint8_t  ack_buf[MESH_HEADER_SIZE];
 
   while (millis() - start < timeout_ms) {
     if (radio.available()) {
       int len = radio.readData(ack_buf, sizeof(ack_buf));
 
-      if (len < 10) {
+      // Restart RX immediately so the radio doesn't go deaf if this
+      // packet fails any check below (CRC, type, dst, src).
+      radio.startReceive();
+
+      if (len < MESH_HEADER_SIZE) {
         delay(1);
         continue;
       }
 
-      // Validate CRC of received ACK
+      // Validate CRC (big-endian at bytes 8-9)
       uint16_t received_crc = ((uint16_t)ack_buf[8] << 8) | ack_buf[9];
-      uint16_t computed_crc = crc16(ack_buf, 8);
+      uint16_t computed_crc = crc16_ccitt(ack_buf, 8);
       if (received_crc != computed_crc) {
         Serial.println("ACK | CRC mismatch on received packet — ignoring");
         delay(1);
@@ -426,13 +403,12 @@ bool wait_for_ack(uint32_t timeout_ms) {
       uint8_t src_id  = ack_buf[1];
       uint8_t dst_id  = ack_buf[2];
 
-      
-      bool is_data_pkt = (GET_PKT_TYPE(flags) == PKT_TYPE_DATA);
-      bool no_ack_req  = ((flags & FLAG_ACK_REQ) == 0);
+      // Accept PKT_TYPE_ACK (0x40) from our parent addressed to us
+      bool is_ack_pkt      = (GET_PKT_TYPE(flags) == PKT_TYPE_ACK);
       bool addressed_to_me = (dst_id == NODE_ID);
-      bool from_parent  = (src_id == get_parent_id());
+      bool from_parent     = (src_id == get_parent_id());
 
-      if (is_data_pkt && no_ack_req && addressed_to_me && from_parent) {
+      if (is_ack_pkt && addressed_to_me && from_parent) {
         Serial.print("ACK | Received from 0x");
         Serial.println(src_id, HEX);
         return true;
@@ -458,13 +434,14 @@ void listen_for_beacons(uint32_t duration_ms) {
       int len  = radio.readData(buf, sizeof(buf));
       int rssi = (int)radio.getRSSI();
 
-      if (len >= 10) {
-        // Check CRC first
+      if (len >= MESH_HEADER_SIZE) {
+        // Validate CRC (big-endian at bytes 8-9)
         uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
-        uint16_t computed_crc = crc16(buf, 8);
+        uint16_t computed_crc = crc16_ccitt(buf, 8);
 
         if (received_crc != computed_crc) {
           // Silently discard corrupted packets
+          radio.startReceive();
           continue;
         }
 
@@ -490,29 +467,28 @@ void listen_for_beacons(uint32_t duration_ms) {
 // PROCESS BEACON
 // Parses a beacon packet and updates the candidate table.
 //
-// Beacon MeshHeader fields of interest:
+// MeshHeader fields used:
 //   [1] src_id   — which node sent the beacon
 //   [6] rank     — that node's rank (0=edge, 1=relay)
 //
-// Beacon payload (4 bytes starting at buf[10]):
+// Beacon payload (4 bytes at buf[MESH_HEADER_SIZE]):
 //   [0] schema_version
 //   [1] queue_pct      (0–100)
-//   [2] link_quality   (0–100, for their uplink — informational)
-//   [3] parent_health  (0–100, informational)
+//   [2] link_quality   (informational)
+//   [3] parent_health  (informational)
 // =============================================================================
 void process_beacon(uint8_t *buf, int len, int rssi) {
-  uint8_t src_id   = buf[1];
-  uint8_t rank     = buf[6];
+  uint8_t src_id      = buf[1];
+  uint8_t rank        = buf[6];
   uint8_t payload_len = buf[7];
 
   // We don't want beacons from ourselves
   if (src_id == NODE_ID) return;
 
   uint8_t queue_pct = 0;
-  if (len >= 14 && payload_len >= 4) {
-    // payload starts at byte 10
-    // buf[10] = schema_version (skip)
-    queue_pct = buf[11];  // queue_pct
+  if (len >= MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE && payload_len >= BEACON_PAYLOAD_SIZE) {
+    // buf[MESH_HEADER_SIZE + 0] = schema_version (skip)
+    queue_pct = buf[MESH_HEADER_SIZE + 1];  // queue_pct
   }
 
   Serial.print("BCN | src=0x");
@@ -543,7 +519,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
     }
   }
   if (slot == -1) {
-    // Table full — replace lowest-scored entry (simple: replace last)
+    // Table full — replace last slot (simple eviction)
     slot = MAX_CANDIDATES - 1;
   }
 
@@ -559,7 +535,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 // PARENT SCORING
 // score = (60 × rank_score) + (25 × rssi_score) + (15 × (100 − queue_pct))
 //
-// rank_score  : rank=0 (edge) → 100, rank=1 (relay) → 75
+// rank_score  : rank=0 (edge) → 100, rank=1 (relay) → 85, rank=2 → 70, ...
 // rssi_score  : maps RSSI [-120, -60] → [0, 100]
 // queue_pct   : lower is better; contribution = 15 × (100 - queue_pct) / 100
 // =============================================================================
@@ -637,14 +613,14 @@ void update_parent_selection() {
 
 // =============================================================================
 // CHECK PARENT TIMEOUT
-// If we haven't heard from the current parent in BEACON_TIMEOUT_MS, drop it.
+// If we haven't heard from the current parent in PARENT_TIMEOUT_MS, drop it.
 // =============================================================================
 void check_parent_timeout() {
   if (current_parent_idx == 0xFF) return;
   if (!candidates[current_parent_idx].valid) return;
 
   uint32_t age = millis() - candidates[current_parent_idx].last_seen_ms;
-  if (age > BEACON_TIMEOUT_MS) {
+  if (age > PARENT_TIMEOUT_MS) {
     Serial.print("PARENT | Timeout on 0x");
     Serial.print(candidates[current_parent_idx].node_id, HEX);
     Serial.print(" (");

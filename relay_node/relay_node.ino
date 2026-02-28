@@ -22,31 +22,12 @@
 #include <Wire.h>
 #include <XPowersLib.h>
 #include <RadioLib.h>
+#include "mesh_protocol.h"
 
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION
 // -----------------------------------------------------------------------------
 #define NODE_ID       0x02    // Relay node
-
-
-// -----------------------------------------------------------------------------
-// PACKET FLAGS (must match sensor_node.ino exactly)
-// -----------------------------------------------------------------------------
-#define PKT_TYPE_DATA       0x00
-#define PKT_TYPE_BEACON     0x20
-#define FLAG_ACK_REQ        0x10
-#define FLAG_FWD            0x08
-
-#define GET_PKT_TYPE(flags)     ((flags) & 0xE0)
-#define IS_ACK_REQUESTED(flags) (((flags) & FLAG_ACK_REQ) != 0)
-
-// -----------------------------------------------------------------------------
-// TIMING PARAMETERS
-// -----------------------------------------------------------------------------
-#define BEACON_INTERVAL_MS    10000UL   // beacon every 10s
-#define BEACON_TIMEOUT_MS     35000UL   // declare parent dead after 35s
-#define ACK_TIMEOUT_MS        600       // wait up to 600ms for hop ACK (future use)
-#define PARENT_SWITCH_HYSTERESIS 8      // min score improvement to switch parent
 
 // Beacon phase offset — spreads beacons across the 10s window to avoid collisions
 // relay NODE_ID=0x02, so offset = (2 % 5) * 2000 = 4000ms
@@ -59,22 +40,6 @@
 #define RADIO_DIO1  33
 #define RADIO_RST   23
 #define RADIO_BUSY  32
-
-// -----------------------------------------------------------------------------
-// DEDUP TABLE (circular buffer, 16 entries, 30s window)
-// -----------------------------------------------------------------------------
-#define DEDUP_TABLE_SIZE  16
-#define DEDUP_WINDOW_MS   30000UL
-
-struct DedupEntry {
-  uint8_t  src_id;
-  uint8_t  seq_num;
-  uint32_t timestamp_ms;
-  bool     valid;
-};
-
-DedupEntry dedup_table[DEDUP_TABLE_SIZE];
-uint8_t    dedup_head = 0;  // next slot to overwrite (circular)
 
 // -----------------------------------------------------------------------------
 // FORWARDING QUEUE COUNTER
@@ -96,10 +61,16 @@ struct ParentInfo {
   bool     valid;
 };
 
-#define MAX_CANDIDATES 4
 ParentInfo candidates[MAX_CANDIDATES];
 uint8_t current_parent_idx = 0xFF;  // 0xFF = no parent yet
-uint8_t my_rank = 255; 
+uint8_t my_rank = 255;
+
+// -----------------------------------------------------------------------------
+// DEDUP TABLE (circular buffer, DEDUP_TABLE_SIZE entries, DEDUP_WINDOW_MS window)
+// Uses DedupEntry from mesh_protocol.h.
+// -----------------------------------------------------------------------------
+DedupEntry dedup_table[DEDUP_TABLE_SIZE];
+uint8_t    dedup_head = 0;  // next slot to overwrite (circular)
 
 // -----------------------------------------------------------------------------
 // OBJECTS
@@ -112,7 +83,6 @@ SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 // -----------------------------------------------------------------------------
 void     init_pmu();
 void     init_radio();
-uint16_t crc16(const uint8_t *data, size_t len);
 void     receive_and_process();
 bool     is_duplicate(uint8_t src_id, uint8_t seq_num);
 void     record_dedup(uint8_t src_id, uint8_t seq_num);
@@ -198,40 +168,24 @@ void init_pmu() {
 
 // =============================================================================
 // RADIO INITIALISATION
+// Uses shared radio constants from mesh_protocol.h.
 // =============================================================================
 void init_radio() {
-  int state = radio.begin(923.0);
+  int state = radio.begin(LORA_FREQUENCY);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.print("ERROR: RadioLib init failed, code ");
     Serial.println(state);
     while (true) delay(1000);
   }
-  radio.setSpreadingFactor(7);
-  radio.setBandwidth(125.0);
-  radio.setCodingRate(5);
-  radio.setSyncWord(0x12);
-  radio.setOutputPower(17);
+  radio.setSpreadingFactor(LORA_SPREADING);
+  radio.setBandwidth(LORA_BANDWIDTH);
+  radio.setCodingRate(LORA_CODING_RATE);
+  radio.setSyncWord(LORA_SYNC_WORD);
+  radio.setOutputPower(LORA_TX_POWER);
   radio.startReceive();  // relay stays in RX by default
-  Serial.println("RadioLib OK — SX1262 @ 923 MHz, SF7");
-}
-
-// =============================================================================
-// CRC16-CCITT (polynomial 0x1021, initial value 0xFFFF)
-// Identical implementation to sensor_node.ino — must stay in sync.
-// =============================================================================
-uint16_t crc16(const uint8_t *data, size_t len) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < len; i++) {
-    crc ^= ((uint16_t)data[i] << 8);
-    for (uint8_t bit = 0; bit < 8; bit++) {
-      if (crc & 0x8000) {
-        crc = (crc << 1) ^ 0x1021;
-      } else {
-        crc <<= 1;
-      }
-    }
-  }
-  return crc;
+  Serial.print("RadioLib OK — SX1262 @ ");
+  Serial.print(LORA_FREQUENCY, 0);
+  Serial.println(" MHz, SF7");
 }
 
 // =============================================================================
@@ -249,7 +203,7 @@ void receive_and_process() {
   radio.startReceive();
 
   // --- Validation 1: Minimum length ---
-  if (len < 10) {
+  if (len < MESH_HEADER_SIZE) {
     Serial.println("DROP | reason=too_short");
     return;
   }
@@ -270,33 +224,36 @@ void receive_and_process() {
 
   // --- Check if this is a beacon from an edge node ---
   if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
-    // Only accept beacons from edge nodes (rank 0)
-    if (rank < my_rank) {  // only accept beacons from nodes closer to edge than us
-        process_beacon(buf, len, rssi);
+    // Only accept beacons from nodes closer to the edge than us
+    if (rank < my_rank) {
+      process_beacon(buf, len, rssi);
     }
     return;  // beacons are never forwarded
+  }
+
+  // --- Drop ACK packets — they are point-to-point, never forwarded ---
+  if (GET_PKT_TYPE(flags) == PKT_TYPE_ACK) {
+    return;
   }
 
   // --- Only process DATA packets beyond this point ---
 
   // --- Validation 3: Dedup check ---
-  uint8_t uid_src = src_id;
-  uint8_t uid_seq = seq;
-  if (is_duplicate(uid_src, uid_seq)) {
+  if (is_duplicate(src_id, seq)) {
     Serial.print("DROP | uid=");
-    Serial.print(uid_src, HEX);
-    Serial.print(uid_seq, HEX);
+    Serial.print(src_id, HEX);
+    Serial.print(seq, HEX);
     Serial.println(" | reason=duplicate");
     return;
   }
 
-  // --- Validation 4: CRC check ---
+  // --- Validation 4: CRC check (big-endian at bytes 8-9) ---
   uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
-  uint16_t computed_crc = crc16(buf, 8);
+  uint16_t computed_crc = crc16_ccitt(buf, 8);
   if (received_crc != computed_crc) {
     Serial.print("DROP | uid=");
-    Serial.print(uid_src, HEX);
-    Serial.print(uid_seq, HEX);
+    Serial.print(src_id, HEX);
+    Serial.print(seq, HEX);
     Serial.println(" | reason=crc_fail");
     return;
   }
@@ -304,26 +261,26 @@ void receive_and_process() {
   // --- Validation 5: TTL check ---
   if (ttl == 0) {
     Serial.print("DROP | uid=");
-    Serial.print(uid_src, HEX);
-    Serial.print(uid_seq, HEX);
+    Serial.print(src_id, HEX);
+    Serial.print(seq, HEX);
     Serial.println(" | reason=ttl_drop");
     return;
   }
 
   // --- Record in dedup table (after all validations pass) ---
-  record_dedup(uid_src, uid_seq);
+  record_dedup(src_id, seq);
 
   // --- ACK the sender BEFORE forwarding ---
   // Only ACK if the sender requested it
-  if (flags & FLAG_ACK_REQ) {
+  if (flags & PKT_FLAG_ACK_REQ) {
     send_ack(buf[3], seq);  // ACK goes to prev_hop
   }
 
   // --- Forward the packet (payload-agnostic) ---
   if (!has_valid_parent()) {
     Serial.print("DROP | uid=");
-    Serial.print(uid_src, HEX);
-    Serial.print(uid_seq, HEX);
+    Serial.print(src_id, HEX);
+    Serial.print(seq, HEX);
     Serial.println(" | reason=no_parent");
     return;
   }
@@ -332,8 +289,8 @@ void receive_and_process() {
 
   // Log successful forward
   Serial.print("FWD  | uid=");
-  Serial.print(uid_src, HEX);
-  Serial.print(uid_seq, HEX);
+  Serial.print(src_id, HEX);
+  Serial.print(seq, HEX);
   Serial.print(" | rssi=");
   Serial.print(rssi);
   Serial.print(" | ttl=");
@@ -351,7 +308,7 @@ bool is_duplicate(uint8_t src_id, uint8_t seq_num) {
   for (int i = 0; i < DEDUP_TABLE_SIZE; i++) {
     if (!dedup_table[i].valid) continue;
     // Expire old entries
-    if (now - dedup_table[i].timestamp_ms > DEDUP_WINDOW_MS) {
+    if (now - dedup_table[i].timestamp > DEDUP_WINDOW_MS) {
       dedup_table[i].valid = false;
       continue;
     }
@@ -368,22 +325,22 @@ bool is_duplicate(uint8_t src_id, uint8_t seq_num) {
 // Writes (src_id, seq_num) into the circular dedup table.
 // =============================================================================
 void record_dedup(uint8_t src_id, uint8_t seq_num) {
-  dedup_table[dedup_head].src_id       = src_id;
-  dedup_table[dedup_head].seq_num      = seq_num;
-  dedup_table[dedup_head].timestamp_ms = millis();
-  dedup_table[dedup_head].valid        = true;
+  dedup_table[dedup_head].src_id    = src_id;
+  dedup_table[dedup_head].seq_num   = seq_num;
+  dedup_table[dedup_head].timestamp = millis();
+  dedup_table[dedup_head].valid     = true;
   dedup_head = (dedup_head + 1) % DEDUP_TABLE_SIZE;  // advance circular pointer
 }
 
 // =============================================================================
 // SEND ACK
-// Sends a pure ACK (10-byte MeshHeader, payload_len=0) to dst_id.
-// Flags: PKT_TYPE_DATA, no FLAG_ACK_REQ (it's the reply).
+// Sends a PKT_TYPE_ACK (10-byte MeshHeader, payload_len=0) to dst_id.
+// Uses PKT_TYPE_ACK (0x40) — matches what sensor_node.ino waits for.
 // =============================================================================
 void send_ack(uint8_t dst_id, uint8_t seq_num) {
-  uint8_t ack[10];
+  uint8_t ack[MESH_HEADER_SIZE];
 
-  ack[0] = PKT_TYPE_DATA;   // data type, no ACK_REQ flag
+  ack[0] = PKT_TYPE_ACK;   // 0x40 — explicit ACK type
   ack[1] = NODE_ID;         // src = relay
   ack[2] = dst_id;          // dst = original sender (prev_hop from their packet)
   ack[3] = NODE_ID;         // prev_hop = relay
@@ -392,11 +349,12 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
   ack[6] = my_rank;         // rank = 1 (relay)
   ack[7] = 0;               // payload_len = 0 (pure ACK)
 
-  uint16_t crc = crc16(ack, 8);
+  // Write CRC big-endian at bytes 8-9
+  uint16_t crc = crc16_ccitt(ack, 8);
   ack[8] = (crc >> 8) & 0xFF;
   ack[9] = crc & 0xFF;
 
-  int state = radio.transmit(ack, 10);
+  int state = radio.transmit(ack, MESH_HEADER_SIZE);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.print("ACK  | to=");
     Serial.print(dst_id, HEX);
@@ -416,32 +374,33 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
 //
 // This is the core of the project. The relay:
 //   1. Sets prev_hop = NODE_ID
-//   2. Sets FLAG_FWD in flags byte
-//   3. Decrements TTL by 1
-//   4. Recalculates CRC over modified bytes 0-7
-//   5. Copies ALL bytes (header + payload) and retransmits
+//   2. Sets PKT_FLAG_FWD in flags byte
+//   3. Clears PKT_FLAG_ACK_REQ (edge doesn't need to ACK relay)
+//   4. Decrements TTL by 1
+//   5. Recalculates CRC (big-endian) over modified bytes 0-7
+//   6. Copies ALL bytes (header + payload) and retransmits
 //
-// RULE: bytes 10 onward are NEVER inspected. They are copied as a block.
-//       The relay does not know or care what sensor type or payload format
-//       is inside. This is the payload-agnostic forwarding guarantee.
+// RULE: bytes MESH_HEADER_SIZE onward are NEVER inspected. They are copied
+//       as a block. The relay does not know or care what sensor type or
+//       payload format is inside. This is the payload-agnostic guarantee.
 // =============================================================================
 void forward_packet(uint8_t *buf, int len) {
   // Track pending forwards for beacon queue_pct
   if (pending_forwards < MAX_PENDING_FORWARDS) pending_forwards++;
 
   // --- Modify only the header fields we own ---
-  buf[0] = (buf[0] | FLAG_FWD) & ~FLAG_ACK_REQ;  // set FWD, clear ACK_REQ
-  buf[2] = get_parent_id();                        // dst = our parent edge
-  buf[3] = NODE_ID;                               // prev_hop = relay
-  buf[4] = buf[4] - 1;                            // decrement TTL
+  buf[0] = (buf[0] | PKT_FLAG_FWD) & ~PKT_FLAG_ACK_REQ;  // set FWD, clear ACK_REQ
+  buf[2] = get_parent_id();                                 // dst = our parent edge
+  buf[3] = NODE_ID;                                         // prev_hop = relay
+  buf[4] = buf[4] - 1;                                      // decrement TTL
 
-  // --- Recalculate CRC over modified bytes 0-7 ---
-  uint16_t crc = crc16(buf, 8);
+  // --- Recalculate CRC (big-endian) over modified bytes 0-7 ---
+  uint16_t crc = crc16_ccitt(buf, 8);
   buf[8] = (crc >> 8) & 0xFF;
   buf[9] = crc & 0xFF;
 
   // --- Transmit (header + payload, all bytes, no inspection of payload) ---
-  int total_len = 10 + buf[7];  // header + payload_len bytes
+  int total_len = MESH_HEADER_SIZE + buf[7];  // header + payload_len bytes
   if (total_len > len) {
     // Sanity check — payload_len field claims more bytes than we received
     Serial.println("FWD  | ERROR: payload_len exceeds received packet length");
@@ -473,17 +432,17 @@ void forward_packet(uint8_t *buf, int len) {
 //   prev_hop   = NODE_ID
 //   ttl        = 1 (beacons don't get forwarded)
 //   seq_num    = 0 (beacons don't use sequence numbers)
-//   rank       = 1 (relay rank)
-//   payload_len= 4
+//   rank       = my_rank (set to parent's rank + 1 after parent is found)
+//   payload_len= BEACON_PAYLOAD_SIZE (4)
 //
 // Beacon payload (4 bytes):
 //   [0] schema_version = 0x01
 //   [1] queue_pct      = real TX queue occupancy (0-100)
 //   [2] link_quality   = RSSI-based quality to parent (0-100), 0 if no parent
-//   [3] parent_health  = ACK success rate to parent (0-100), 0 if no parent
+//   [3] parent_health  = 100 if parent valid, 0 if not
 // =============================================================================
 void broadcast_beacon() {
-  uint8_t beacon[14];  // 10-byte header + 4-byte payload
+  uint8_t beacon[MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE];
 
   uint8_t qpct = compute_queue_pct();
 
@@ -497,28 +456,28 @@ void broadcast_beacon() {
     link_quality = (uint8_t)((clamped + 120) * 100 / 60);
   }
 
-  // MeshHeader
+  // MeshHeader (bytes 0-9)
   beacon[0] = PKT_TYPE_BEACON;
   beacon[1] = NODE_ID;
-  beacon[2] = 0xFF;       // broadcast
+  beacon[2] = 0xFF;         // broadcast
   beacon[3] = NODE_ID;
-  beacon[4] = 1;          // TTL = 1, beacons don't get forwarded
-  beacon[5] = 0x00;       // seq_num not used for beacons
-  beacon[6] = my_rank;         // rank = 1 (relay)
-  beacon[7] = 4;          // payload_len
+  beacon[4] = 1;            // TTL = 1, beacons don't get forwarded
+  beacon[5] = 0x00;         // seq_num not used for beacons
+  beacon[6] = my_rank;      // dynamic rank (255=orphan, 1=connected to edge)
+  beacon[7] = BEACON_PAYLOAD_SIZE;
 
-  uint16_t crc = crc16(beacon, 8);
+  // CRC big-endian
+  uint16_t crc = crc16_ccitt(beacon, 8);
   beacon[8] = (crc >> 8) & 0xFF;
   beacon[9] = crc & 0xFF;
 
-  // Beacon payload
+  // Beacon payload (bytes 10-13)
   beacon[10] = 0x01;          // schema_version
   beacon[11] = qpct;          // queue_pct
   beacon[12] = link_quality;  // link_quality to parent
-  beacon[13] = 100;           // parent_health — simplified: 100 if parent valid, 0 if not
-  if (!has_valid_parent()) beacon[13] = 0;
+  beacon[13] = has_valid_parent() ? 100 : 0;  // parent_health
 
-  int state = radio.transmit(beacon, 14);
+  int state = radio.transmit(beacon, MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.print("BCN  | queue=");
     Serial.print(qpct);
@@ -539,14 +498,14 @@ void broadcast_beacon() {
 // Updates the candidate table with info from an edge node beacon.
 // =============================================================================
 void process_beacon(uint8_t *buf, int len, int rssi) {
-  uint8_t src_id     = buf[1];
-  uint8_t rank       = buf[6];
-  uint8_t pay_len    = buf[7];
-  uint8_t queue_pct  = 0;
+  uint8_t src_id    = buf[1];
+  uint8_t rank      = buf[6];
+  uint8_t pay_len   = buf[7];
+  uint8_t queue_pct = 0;
 
-  if (len >= 14 && pay_len >= 4) {
-    // buf[10] = schema_version (skip)
-    queue_pct = buf[11];
+  if (len >= MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE && pay_len >= BEACON_PAYLOAD_SIZE) {
+    // buf[MESH_HEADER_SIZE + 0] = schema_version (skip)
+    queue_pct = buf[MESH_HEADER_SIZE + 1];
   }
 
   Serial.print("BCN  | src=0x");
@@ -561,16 +520,16 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 
   int slot = -1;
   for (int i = 0; i < MAX_CANDIDATES; i++) {
-      if (candidates[i].valid && candidates[i].node_id == src_id) {
-          slot = i; break;
-      }
+    if (candidates[i].valid && candidates[i].node_id == src_id) {
+      slot = i; break;
+    }
   }
   if (slot == -1) {
-      for (int i = 0; i < MAX_CANDIDATES; i++) {
-          if (!candidates[i].valid) { slot = i; break; }
-      }
+    for (int i = 0; i < MAX_CANDIDATES; i++) {
+      if (!candidates[i].valid) { slot = i; break; }
+    }
   }
-  if (slot == -1) slot = 0;
+  if (slot == -1) slot = 0;  // evict first slot if table full
 
   candidates[slot].node_id      = src_id;
   candidates[slot].rssi         = (int8_t)rssi;
@@ -657,14 +616,14 @@ void update_parent_selection() {
 
 // =============================================================================
 // CHECK PARENT TIMEOUT
-// Invalidates current parent if no beacon heard within BEACON_TIMEOUT_MS.
+// Invalidates current parent if no beacon heard within PARENT_TIMEOUT_MS.
 // =============================================================================
 void check_parent_timeout() {
   if (current_parent_idx == 0xFF) return;
   if (!candidates[current_parent_idx].valid) return;
 
   uint32_t age = millis() - candidates[current_parent_idx].last_seen_ms;
-  if (age > BEACON_TIMEOUT_MS) {
+  if (age > PARENT_TIMEOUT_MS) {
     Serial.print("PARENT | Timeout on 0x");
     Serial.print(candidates[current_parent_idx].node_id, HEX);
     Serial.print(" (");
@@ -673,10 +632,9 @@ void check_parent_timeout() {
 
     candidates[current_parent_idx].valid = false;
     current_parent_idx = 0xFF;
+    my_rank = 255;
 
     // Try to fall back to the other edge immediately
-    
-    my_rank = 255;
     update_parent_selection();
   }
 }

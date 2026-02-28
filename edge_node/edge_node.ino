@@ -189,7 +189,7 @@ void setup() {
     
     boot_time = millis();
     last_flush_time = millis();
-    last_beacon_time = millis() - BEACON_INTERVAL + BEACON_PHASE_OFFSET;
+    last_beacon_time = millis() - BEACON_INTERVAL_MS + BEACON_PHASE_OFFSET;
     
     Serial.println(F("\n════════════════════════════════════════════════════"));
     Serial.println(F("Edge node ready! Listening for mesh packets..."));
@@ -212,7 +212,7 @@ void loop() {
         broadcast_beacon_if_due();
         
         // Check if we need to flush to LoRaWAN
-        bool timeout_flush = (now - last_flush_time >= AGG_FLUSH_TIMEOUT);
+        bool timeout_flush = (now - last_flush_time >= AGG_FLUSH_TIMEOUT_MS);
         bool buffer_flush = (agg_count >= MAX_AGG_RECORDS);
         
         if ((timeout_flush || buffer_flush) && agg_count > 0 && lorawan_joined) {
@@ -248,7 +248,11 @@ void receive_mesh_packets() {
     int len = radio.readData(buf, sizeof(buf));
     int rssi = radio.getRSSI();
     float snr = radio.getSNR();
-    
+
+    // Restart RX immediately so the radio doesn't sit in standby while we
+    // process (or drop) this packet. Mirrors the relay_node pattern.
+    radio.startReceive();
+
     packets_received++;
     
     // ──────────────────────────────────────────────────────────────────────
@@ -358,7 +362,7 @@ void handle_beacon(MeshHeader* hdr, int rssi, float snr) {
 }
 
 void broadcast_beacon_if_due() {
-    if (millis() - last_beacon_time < BEACON_INTERVAL) {
+    if (millis() - last_beacon_time < BEACON_INTERVAL_MS) {
         return;
     }
     
@@ -376,7 +380,7 @@ void broadcast_beacon_if_due() {
     hdr.payload_len = BEACON_PAYLOAD_SIZE;
     
     // Compute CRC over bytes 0-7
-    hdr.crc16 = compute_mesh_crc(&hdr);
+    set_mesh_crc(&hdr);
     
     // Build BeaconPayload
     BeaconPayload bcn;
@@ -412,7 +416,7 @@ void broadcast_beacon_if_due() {
 // ════════════════════════════════════════════════════════════════════════════
 
 void handle_data(MeshHeader* hdr, uint8_t* payload, int rssi, float snr) {
-    uint8_t hop_count = 10 - hdr->ttl;  // Estimate hops from remaining TTL
+    uint8_t hop_count = DEFAULT_TTL - hdr->ttl;  // Estimate hops from remaining TTL
     
     Serial.println(F("────────────────────────────────────────────────────"));
     Serial.print(F("RX_MESH | src=0x"));
@@ -476,7 +480,7 @@ void send_ack(uint8_t to_node, uint8_t seq) {
     ack.seq_num = seq;  // Echo the sequence number
     ack.rank = MY_RANK;
     ack.payload_len = 0;
-    ack.crc16 = compute_mesh_crc(&ack);
+    set_mesh_crc(&ack);
     
     delay(random(10, 50));  // Small jitter to avoid collision
     
@@ -596,7 +600,7 @@ bool is_duplicate(uint8_t src_id, uint8_t seq_num) {
         if (dedup_table[i].src_id == src_id && 
             dedup_table[i].seq_num == seq_num) {
             // Check if within dedup window (30s)
-            if (now - dedup_table[i].timestamp < DEDUP_WINDOW) {
+            if (now - dedup_table[i].timestamp < DEDUP_WINDOW_MS) {
                 return true;
             }
         }
