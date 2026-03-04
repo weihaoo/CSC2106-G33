@@ -11,6 +11,7 @@
 #define MESH_PROTOCOL_H
 
 #include <Arduino.h>
+#include <RadioLib.h>
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORA RADIO PARAMETERS (AS923, Singapore — all nodes must match exactly)
@@ -36,6 +37,10 @@
 #define DEDUP_TABLE_SIZE         16        // Max recent packets tracked for dedup
 #define MAX_CANDIDATES           4         // Max parent candidates tracked by sensor/relay
 #define PARENT_SWITCH_HYSTERESIS 8         // Min score improvement needed to switch parent
+
+// Listen-Before-Talk (LBT) with Channel Activity Detection (CAD)
+#define LBT_MAX_RETRIES          3         // Max CAD attempts before forcing TX
+#define LBT_BASE_DELAY_MS        100       // Back-off base delay (doubles each retry)
 
 // Edge node aggregation
 #define MAX_AGG_RECORDS          7         // Max sensor readings per LoRaWAN uplink
@@ -228,6 +233,43 @@ inline bool validate_mesh_crc(const MeshHeader* hdr) {
     uint16_t computed = crc16_ccitt((const uint8_t*)hdr, 8);
     uint16_t stored   = ((uint16_t)hdr->crc16[0] << 8) | hdr->crc16[1];
     return (computed == stored);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// LISTEN-BEFORE-TALK (LBT) WITH CHANNEL ACTIVITY DETECTION
+//
+// Wraps radio.transmit() with a CAD scan. If the channel is busy, backs off
+// with exponential delay (100ms → 200ms → 400ms) + random jitter.
+// After LBT_MAX_RETRIES failed CAD attempts, transmits anyway.
+//
+// Usage: replace radio.transmit(data, len) with lbt_transmit(radio, data, len)
+// Do NOT use for LoRaWAN sendReceive() — LoRaWAN manages its own channel.
+// ════════════════════════════════════════════════════════════════════════════
+
+inline int lbt_transmit(SX1262 &radio, uint8_t *data, uint8_t len) {
+    for (uint8_t attempt = 0; attempt < LBT_MAX_RETRIES; attempt++) {
+        int cadResult = radio.scanChannel();
+
+        if (cadResult == RADIOLIB_CHANNEL_FREE) {
+            // Channel is clear — transmit immediately
+            return radio.transmit(data, len);
+        }
+
+        // Channel busy — exponential back-off with random jitter
+        uint16_t backoff = (LBT_BASE_DELAY_MS << attempt) + random(0, 50);
+        Serial.print(F("LBT | Channel busy, attempt "));
+        Serial.print(attempt + 1);
+        Serial.print(F("/"));
+        Serial.print(LBT_MAX_RETRIES);
+        Serial.print(F(", backing off "));
+        Serial.print(backoff);
+        Serial.println(F(" ms"));
+        delay(backoff);
+    }
+
+    // All CAD retries exhausted — transmit anyway to avoid dropping the packet
+    Serial.println(F("LBT | Max retries reached, transmitting anyway"));
+    return radio.transmit(data, len);
 }
 
 #endif // MESH_PROTOCOL_H

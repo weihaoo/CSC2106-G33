@@ -349,7 +349,7 @@ bool send_with_ack(uint8_t *packet, uint8_t total_len) {
     Serial.println(get_parent_id(), HEX);
 
     // Transmit
-    int state = radio.transmit(packet, total_len);
+    int state = lbt_transmit(radio, packet, total_len);
     if (state != RADIOLIB_ERR_NONE) {
       Serial.print("TX | TX failed, RadioLib code ");
       Serial.println(state);

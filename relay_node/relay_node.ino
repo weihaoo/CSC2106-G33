@@ -378,7 +378,7 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
   ack[8] = (crc >> 8) & 0xFF;
   ack[9] = crc & 0xFF;
 
-  int state = radio.transmit(ack, MESH_HEADER_SIZE);
+  int state = lbt_transmit(radio, ack, MESH_HEADER_SIZE);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.print("ACK  | to=");
     Serial.print(dst_id, HEX);
@@ -435,7 +435,7 @@ void forward_packet(uint8_t *buf, int len) {
     return;
   }
 
-  int state = radio.transmit(buf, total_len);
+  int state = lbt_transmit(radio, buf, total_len);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.print("FWD  | TX failed, RadioLib code ");
     Serial.println(state);
@@ -504,7 +504,7 @@ void broadcast_beacon() {
   beacon[12] = link_quality;  // link_quality to parent
   beacon[13] = has_valid_parent() ? 100 : 0;  // parent_health
 
-  int state = radio.transmit(beacon, MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE);
+  int state = lbt_transmit(radio, beacon, MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE);
   if (state == RADIOLIB_ERR_NONE) {
     Serial.print("BCN  | queue=");
     Serial.print(qpct);

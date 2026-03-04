@@ -463,7 +463,7 @@ void broadcast_beacon_if_due()
     memcpy(pkt, &hdr, MESH_HEADER_SIZE);
     memcpy(pkt + MESH_HEADER_SIZE, &bcn, BEACON_PAYLOAD_SIZE);
 
-    int state = radio.transmit(pkt, sizeof(pkt));
+    int state = lbt_transmit(radio, pkt, sizeof(pkt));
 
     if (state == RADIOLIB_ERR_NONE)
     {
@@ -563,7 +563,7 @@ void send_ack(uint8_t to_node, uint8_t seq)
 
     delay(random(10, 50)); // Small jitter to avoid collision
 
-    int state = radio.transmit((uint8_t *)&ack, MESH_HEADER_SIZE);
+    int state = lbt_transmit(radio, (uint8_t *)&ack, MESH_HEADER_SIZE);
 
     if (state == RADIOLIB_ERR_NONE)
     {
