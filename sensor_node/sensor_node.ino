@@ -125,6 +125,13 @@ void setup() {
   // dht.begin();
   // delay(2000);  // DHT22 needs 2s after power-on before first read
 
+  // Apply beacon phase offset to spread out boot-time beacon scans across nodes
+  // (same pattern as relay_node.ino — prevents simultaneous scanning after power-on)
+  Serial.print("BOOT | Beacon phase offset: ");
+  Serial.print(TX_PHASE_OFFSET_MS);
+  Serial.println(" ms");
+  delay(TX_PHASE_OFFSET_MS);
+
   Serial.println("BOOT | Waiting for beacon before first TX...");
 }
 
