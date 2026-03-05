@@ -12,7 +12,7 @@
 
 // For Edge 1 (primary): use 0x01
 // For Edge 2 (standby): use 0x06
-#define NODE_ID 0x01
+#define NODE_ID 0x6
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORAWAN OTAA CREDENTIALS (from Person 4 / TTN Console)

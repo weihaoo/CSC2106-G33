@@ -751,6 +751,14 @@ void broadcast_beacon() {
 
   uint8_t qpct = compute_queue_pct();
 
+  // Propagate downstream congestion: report max of own queue and parent's
+  // reported queue_pct. Without this, relay/sensor always shows queue=0%
+  // even when the edge's aggregation buffer is full.
+  if (has_valid_parent()) {
+    uint8_t parent_qpct = candidates[current_parent_idx].queue_pct;
+    if (parent_qpct > qpct) qpct = parent_qpct;
+  }
+
   // Compute link_quality from parent RSSI (map [-120,-60] → [0,100])
   uint8_t link_quality = 0;
   if (has_valid_parent()) {
