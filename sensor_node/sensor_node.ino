@@ -543,7 +543,12 @@ void receive_and_process() {
 
   // ---- DATA — only process DATA packets beyond this point ----
 
-  // --- Validation 3: Dedup check ---
+  // --- Validation 3: Destination check (prevents cross-path forwarding) ---
+  if (dst_id != NODE_ID) {
+    return;  // Not addressed to us — ignore
+  }
+
+  // --- Validation 4: Dedup check ---
   if (is_duplicate(src_id, seq)) {
     Serial.print("DROP | uid=");
     Serial.print(src_id, HEX);
@@ -552,7 +557,7 @@ void receive_and_process() {
     return;
   }
 
-  // --- Validation 4: CRC check (big-endian at bytes 8-9) ---
+  // --- Validation 5: CRC check (big-endian at bytes 8-9) ---
   uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
   uint16_t computed_crc = crc16_ccitt(buf, 8);
   if (received_crc != computed_crc) {
@@ -563,7 +568,7 @@ void receive_and_process() {
     return;
   }
 
-  // --- Validation 5: TTL check ---
+  // --- Validation 6: TTL check ---
   if (ttl == 0) {
     Serial.print("DROP | uid=");
     Serial.print(src_id, HEX);
@@ -904,6 +909,13 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
   int total = (60 * rank_score / 100)
             + (25 * rssi_score / 100)
             + (15 * queue_score / 100);
+
+  // Hard penalty: if parent queue is near-full, halve the score.
+  // This ensures nodes switch away from congested parents regardless
+  // of rank/RSSI advantage, preventing data loss at full sinks.
+  if (queue_pct >= 80) {
+    total = total / 2;
+  }
 
   return total;
 }
