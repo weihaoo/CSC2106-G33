@@ -31,4 +31,5 @@ secrets.h
 # Serial logs
 *.log
 
-references
+# Docs
+./docs
