@@ -20,6 +20,10 @@
 //       Sensor 1 = 0x03, Sensor 2 = 0x04
 // =============================================================================
 
+// CHANGE THIS BEFORE FLASHING: Sensor 1 = SENSOR-03, Sensor 2 = SENSOR-04
+#define NODE_NAME "SENSOR-03"
+#include "logging.h"
+
 #include <Wire.h>
 #include <XPowersLib.h>
 #include <RadioLib.h>
@@ -149,7 +153,8 @@ uint8_t  compute_queue_pct();
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("=== CSC2106 G33 | Sensor+Relay Node 0x" + String(NODE_ID, HEX) + " ===");
+
+  log_boot_banner("Sensor Node");
 
   // Initialise candidates table
   for (int i = 0; i < MAX_CANDIDATES; i++) {
@@ -161,17 +166,25 @@ void setup() {
     dedup_table[i].valid = false;
   }
 
+  LOG_INFO("Initializing PMU (AXP2101)...");
   init_pmu();
+  LOG_OK("PMU initialized - LoRa radio powered");
+
+  LOG_INFO("Initializing LoRa radio...");
   init_radio();
+
+  char buf[64];
+  sprintf(buf, "Radio ready: %.1f MHz, SF%d, BW%.0f kHz",
+          LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
+  LOG_OK(buf);
 
   // Uncomment when using real DHT22:
   // dht.begin();
   // delay(2000);  // DHT22 needs 2s after power-on before first read
 
-  // Apply beacon phase offset to spread out boot-time beacon scans across nodes
-  Serial.print("BOOT | Beacon phase offset: ");
-  Serial.print(BEACON_PHASE_OFFSET_MS);
-  Serial.println(" ms");
+  // Apply beacon phase offset
+  sprintf(buf, "Beacon phase offset: %lu ms", BEACON_PHASE_OFFSET_MS);
+  LOG_INFO(buf);
   delay(BEACON_PHASE_OFFSET_MS);
 
   // Beacon immediately at boot so other nodes can discover us
@@ -181,7 +194,7 @@ void setup() {
   rxFlag = false;
   radio.startReceive();
 
-  Serial.println("BOOT | Sensor+Relay ready. Listening...");
+  LOG_INFO("Sensor node ready. Listening for parent beacons...");
 }
 
 // =============================================================================

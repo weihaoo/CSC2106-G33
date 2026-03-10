@@ -19,6 +19,10 @@
 //   3. Attach LoRa antenna to SMA connector (CRITICAL!)
 // ════════════════════════════════════════════════════════════════════════════
 
+// CHANGE THIS BEFORE FLASHING: EDGE-01 for Node 0x01, EDGE-06 for Node 0x06
+#define NODE_NAME "EDGE-01"
+#include "logging.h"
+
 #include <Wire.h>
 #include <XPowersLib.h>
 #include <RadioLib.h>
@@ -108,69 +112,53 @@ uint32_t uplinks_sent = 0;
 void setup()
 {
     Serial.begin(115200);
-    delay(1000); // Wait for serial to initialize
+    delay(1000);
 
-    Serial.println(F("\n\n════════════════════════════════════════════════════"));
-    Serial.println(F("     EDGE NODE - CSC2106 G33 (Person 3)"));
-    Serial.println(F("════════════════════════════════════════════════════"));
-    Serial.print(F("Node ID: 0x"));
-    Serial.println(NODE_ID, HEX);
-    Serial.print(F("Rank: "));
-    Serial.println(MY_RANK);
-    Serial.println(F("════════════════════════════════════════════════════\n"));
+    log_boot_banner("Edge Node");
 
-    // ──────────────────────────────────────────────────────────────────────
-    // PHASE 1: PMU INITIALIZATION (CRITICAL!)
-    // ──────────────────────────────────────────────────────────────────────
+    char buf[64];
+    sprintf(buf, "Node ID: 0x%02X | Rank: %d", NODE_ID, MY_RANK);
+    LOG_INFO(buf);
 
-    Serial.println(F("[INIT] Initializing PMU (AXP2101)..."));
+    // Initialize PMU
+    LOG_INFO("Initializing PMU (AXP2101)...");
     Wire.begin(PMU_SDA, PMU_SCL);
 
     if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, PMU_SDA, PMU_SCL))
     {
-        Serial.println(F("[ERROR] PMU init failed! Check I2C wiring."));
+        LOG_ERROR("PMU init failed! Check I2C wiring.");
         while (true)
             delay(1000);
     }
 
-    // Power on the SX1262 radio via ALDO2 rail
-    PMU.setALDO2Voltage(3300); // 3.3V
+    PMU.setALDO2Voltage(3300);
     PMU.enableALDO2();
-    Serial.println(F("[OK] PMU initialized — LoRa radio powered via ALDO2"));
+    LOG_OK("PMU initialized - LoRa radio powered via ALDO2");
 
-    delay(100); // Let radio power stabilize
+    delay(100);
 
-    // ──────────────────────────────────────────────────────────────────────
-    // PHASE 2: RADIOLIB MESH INITIALIZATION
-    // ──────────────────────────────────────────────────────────────────────
-
-    Serial.println(F("[INIT] Initializing RadioLib for mesh..."));
+    // Initialize RadioLib for mesh
+    LOG_INFO("Initializing RadioLib for mesh...");
 
     int state = radio.begin(LORA_FREQUENCY);
     if (state != RADIOLIB_ERR_NONE)
     {
-        Serial.print(F("[ERROR] RadioLib init failed, code "));
-        Serial.println(state);
+        LOG_ERROR("RadioLib init failed");
+        sprintf(buf, "Error code: %d", state);
+        LOG_ERROR(buf);
         while (true)
             delay(1000);
     }
 
-    // Configure LoRa for mesh (SF7, 125kHz, CR 4/5, sync 0x12)
     radio.setSpreadingFactor(LORA_SPREADING);
     radio.setBandwidth(LORA_BANDWIDTH);
     radio.setCodingRate(LORA_CODING_RATE);
     radio.setSyncWord(LORA_SYNC_WORD);
     radio.setOutputPower(LORA_TX_POWER);
 
-    Serial.println(F("[OK] RadioLib mesh config:"));
-    Serial.print(F("     Frequency: "));
-    Serial.print(LORA_FREQUENCY);
-    Serial.println(F(" MHz (AS923)"));
-    Serial.print(F("     SF: "));
-    Serial.print(LORA_SPREADING);
-    Serial.print(F(", BW: "));
-    Serial.print(LORA_BANDWIDTH);
-    Serial.println(F(" kHz"));
+    sprintf(buf, "Radio ready: %.1f MHz, SF%d, BW%.0f kHz",
+            LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
+    LOG_OK(buf);
 
     // Set up DIO1 interrupt for non-blocking receive
     radio.setDio1Action(setRxFlag);
