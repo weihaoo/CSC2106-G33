@@ -47,6 +47,15 @@
 #define AGG_FLUSH_TIMEOUT_MS     240000UL  // Flush to TTN after 4 minutes regardless
 
 // ════════════════════════════════════════════════════════════════════════════
+// DAG (DIRECTED ACYCLIC GRAPH) CONFIGURATION
+// Enable multiple active parents for load balancing and redundancy
+// ════════════════════════════════════════════════════════════════════════════
+
+#define DAG_ENABLED              true      // Enable multi-parent DAG architecture
+#define PARENT_THRESHOLD_SCORE   50        // Minimum score to be an active parent
+#define MAX_ACTIVE_PARENTS       MAX_CANDIDATES  // Max simultaneous active parents
+
+// ════════════════════════════════════════════════════════════════════════════
 // NODE RANK VALUES
 // Rank 0 = closest to TTN (edge), higher = further away
 // ════════════════════════════════════════════════════════════════════════════
