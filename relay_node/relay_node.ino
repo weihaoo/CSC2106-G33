@@ -50,6 +50,13 @@ volatile uint8_t pending_forwards = 0;
 #define MAX_PENDING_FORWARDS  10
 
 // -----------------------------------------------------------------------------
+// ACK TRACKING — for forward_packet() to detect ACKs from parent
+// -----------------------------------------------------------------------------
+volatile bool ack_received = false;
+uint8_t       ack_expected_seq = 0;
+bool          waiting_for_ack = false;
+
+// -----------------------------------------------------------------------------
 // DAG PARENT SET (MULTIPLE ACTIVE PARENTS)
 // -----------------------------------------------------------------------------
 struct ParentSetEntry {
@@ -112,6 +119,8 @@ void     update_parent_set();
 uint8_t  select_parent_for_packet();
 bool     is_stale(uint32_t last_seen);
 uint8_t  compute_queue_pct();
+bool     wait_for_ack(uint32_t timeout_ms);
+void     check_parent_staleness();
 
 // =============================================================================
 // SETUP
@@ -162,13 +171,23 @@ void setup() {
 // =============================================================================
 void loop() {
     static uint32_t last_beacon_ms = millis();
+    static uint32_t last_stale_check_ms = millis();
     
     uint32_t now = millis();
+    
+    // --- Step 1: Broadcast beacon if due ---
     if (now - last_beacon_ms >= BEACON_INTERVAL_MS) {
         last_beacon_ms = now;
         broadcast_beacon();
     }
     
+    // --- Step 2: Check for stale parents (self-healing) ---
+    if (now - last_stale_check_ms >= 5000UL) {  // Check every 5s
+        last_stale_check_ms = now;
+        check_parent_staleness();
+    }
+    
+    // --- Step 3: Process incoming packets ---
     receive_and_process();
 }
 
@@ -250,13 +269,34 @@ void receive_and_process() {
     // Check beacon
     if (GET_PKT_TYPE(flags) == PKT_TYPE_BEACON) {
         if (rank < my_rank) {
-            process_beacon(buf, len, rssi);
+            // Validate CRC before processing
+            uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
+            uint16_t computed_crc = crc16_ccitt(buf, 8);
+            if (received_crc == computed_crc) {
+                process_beacon(buf, len, rssi);
+            } else {
+                LOG_DROP("Beacon CRC mismatch");
+            }
         }
         return;
     }
     
-    // Drop ACK packets
+    // Handle ACK packets
     if (GET_PKT_TYPE(flags) == PKT_TYPE_ACK) {
+        // Validate CRC
+        uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
+        uint16_t computed_crc = crc16_ccitt(buf, 8);
+        if (received_crc != computed_crc) {
+            LOG_DROP("ACK CRC mismatch");
+            return;
+        }
+        // Check if this ACK is for a packet we forwarded
+        if (dst_id == NODE_ID && waiting_for_ack && seq == ack_expected_seq) {
+            char msg[64];
+            sprintf(msg, "Received ACK for fwd #%d from %s", seq, node_name(src_id));
+            LOG_ACK(msg);
+            ack_received = true;
+        }
         return;
     }
     
@@ -299,7 +339,16 @@ void receive_and_process() {
         send_ack(buf[3], seq);
     }
     
-    // Forward the packet (DAG selection)
+    // Loop prevention: don't forward back to the node that sent it to us
+    uint8_t fwd_target = select_parent_for_packet();
+    if (fwd_target == buf[3]) {  // buf[3] = prev_hop
+        char msg[64];
+        sprintf(msg, "Loop detected: would forward #%d back to %s", seq, node_name(fwd_target));
+        LOG_DROP(msg);
+        return;
+    }
+    
+    // Forward the packet (DAG selection with ACK + retry)
     forward_packet(buf, len);
 }
 
@@ -363,7 +412,26 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
 }
 
 // =============================================================================
-// FORWARD PACKET (DAG - Multiple Parent Selection)
+// WAIT FOR ACK
+// Listens for up to `timeout_ms` milliseconds, processing incoming packets.
+// Returns true if an ACK matching ack_expected_seq is received.
+// =============================================================================
+bool wait_for_ack(uint32_t timeout_ms) {
+    uint32_t start = millis();
+    while (millis() - start < timeout_ms) {
+        receive_and_process();
+        if (ack_received) return true;
+        delay(1);
+    }
+    return false;
+}
+
+// =============================================================================
+// FORWARD PACKET (DAG - Multiple Parent Selection, with ACK + Retry)
+//
+// Keeps ACK_REQ set so the parent (edge) acknowledges receipt.
+// Retries up to MAX_RETRIES times if no ACK is received.
+// This ensures reliable delivery across the relay→edge hop.
 // =============================================================================
 void forward_packet(uint8_t *buf, int len) {
     log_separator_packet();
@@ -398,8 +466,8 @@ void forward_packet(uint8_t *buf, int len) {
     // Update counters
     if (pending_forwards < MAX_PENDING_FORWARDS) pending_forwards++;
     
-    // Modify header
-    buf[0] = (buf[0] | PKT_FLAG_FWD) & ~PKT_FLAG_ACK_REQ;
+    // Modify header — keep ACK_REQ so parent acknowledges receipt
+    buf[0] = buf[0] | PKT_FLAG_FWD;  // set FWD, keep ACK_REQ
     buf[2] = target;
     buf[3] = NODE_ID;
     buf[4] = ttl - 1;
@@ -409,7 +477,7 @@ void forward_packet(uint8_t *buf, int len) {
     buf[8] = (crc >> 8) & 0xFF;
     buf[9] = crc & 0xFF;
     
-    // Transmit
+    // Validate total length
     int total_len = MESH_HEADER_SIZE + payload_len;
     if (total_len > len) {
         LOG_ERROR("Payload length exceeds packet size");
@@ -417,9 +485,44 @@ void forward_packet(uint8_t *buf, int len) {
         return;
     }
     
-    int state = lbt_transmit(radio, buf, total_len);
-    if (state != RADIOLIB_ERR_NONE) {
-        LOG_ERROR("Forward transmission failed");
+    // Send with ACK + retry for reliable forwarding
+    bool success = false;
+    for (uint8_t attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        sprintf(msg, "FWD attempt %d/%d → %s", attempt, MAX_RETRIES, node_name(target));
+        LOG_FWD(msg);
+        
+        int state = lbt_transmit(radio, buf, total_len);
+        if (state != RADIOLIB_ERR_NONE) {
+            LOG_ERROR("Forward TX failed");
+            delay(200);
+            continue;
+        }
+        
+        // Wait for ACK from parent
+        ack_received = false;
+        ack_expected_seq = seq;
+        waiting_for_ack = true;
+        
+        rxFlag = false;
+        radio.startReceive();
+        
+        if (wait_for_ack(ACK_TIMEOUT_MS)) {
+            waiting_for_ack = false;
+            success = true;
+            sprintf(msg, "Forward ACK received for #%d", seq);
+            LOG_OK(msg);
+            break;
+        }
+        
+        waiting_for_ack = false;
+        sprintf(msg, "No ACK for forward #%d, retrying...", seq);
+        LOG_WARN(msg);
+        delay(100 * attempt);  // back-off
+    }
+    
+    if (!success) {
+        sprintf(msg, "All forward retries failed for #%d from %s", seq, node_name(src_id));
+        LOG_ERROR(msg);
     }
     
     if (pending_forwards > 0) pending_forwards--;
@@ -578,15 +681,27 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
 
 // =============================================================================
 // UPDATE PARENT SET (DAG)
+// Rebuilds the active parent set from candidates.
+// Invalidates stale candidates so their slots can be reused.
+// Sends a rapid beacon if the parent count changed (self-organizing).
 // =============================================================================
 void update_parent_set() {
-    uint32_t now = millis();
+    uint8_t old_parent_count = active_parent_count;
     active_parent_count = 0;
     
-    // Score all candidates and build active parent set
+    // Invalidate stale candidates so their slots can be reused
+    for (int i = 0; i < MAX_CANDIDATES; i++) {
+        if (candidates[i].valid && is_stale(candidates[i].last_seen_ms)) {
+            char msg[64];
+            sprintf(msg, "Expired stale candidate %s", node_name(candidates[i].node_id));
+            LOG_PARENT(msg);
+            candidates[i].valid = false;
+        }
+    }
+    
+    // Score valid candidates and build active parent set
     for (int i = 0; i < MAX_CANDIDATES; i++) {
         if (!candidates[i].valid) continue;
-        if (is_stale(candidates[i].last_seen_ms)) continue;
         
         int score = score_parent(candidates[i].rank,
                                   candidates[i].rssi,
@@ -603,31 +718,45 @@ void update_parent_set() {
         }
     }
     
+    // Clear unused parent_set entries (prevent stale active flags)
+    for (int i = active_parent_count; i < MAX_ACTIVE_PARENTS; i++) {
+        parent_set[i].active = false;
+    }
+    
     // Update my_rank based on best parent
     int best_score = -1;
     uint8_t best_rank = 255;
     for (int i = 0; i < MAX_CANDIDATES; i++) {
-        if (candidates[i].valid && !is_stale(candidates[i].last_seen_ms)) {
-            int s = score_parent(candidates[i].rank, candidates[i].rssi, candidates[i].queue_pct);
-            if (s > best_score) {
-                best_score = s;
-                best_rank = candidates[i].rank;
-            }
+        if (!candidates[i].valid) continue;
+        int s = score_parent(candidates[i].rank, candidates[i].rssi, candidates[i].queue_pct);
+        if (s > best_score) {
+            best_score = s;
+            best_rank = candidates[i].rank;
         }
     }
     if (best_rank != 255) {
         my_rank = best_rank + 1;
+    } else {
+        my_rank = RANK_RELAY;  // Reset to default if no parents
     }
     
     // Log parent set
     char msg[80];
-    sprintf(msg, "Parent set updated: %d active parents", active_parent_count);
+    sprintf(msg, "Parent set updated: %d active parents (rank=%d)", active_parent_count, my_rank);
     LOG_PARENT(msg);
     
     for (int i = 0; i < active_parent_count; i++) {
         sprintf(msg, "  [%d] %s (score: %d)", 
                 i+1, node_name(parent_set[i].node_id), parent_set[i].score);
         log_detail(msg);
+    }
+    
+    // Rapid beacon on topology change — tell downstream nodes immediately
+    if (active_parent_count != old_parent_count) {
+        sprintf(msg, "Topology changed: %d→%d parents, sending rapid beacon", 
+                old_parent_count, active_parent_count);
+        LOG_PARENT(msg);
+        broadcast_beacon();
     }
 }
 
@@ -663,6 +792,24 @@ uint8_t select_parent_for_packet() {
 // =============================================================================
 bool is_stale(uint32_t last_seen) {
     return (millis() - last_seen) > PARENT_TIMEOUT_MS;
+}
+
+// =============================================================================
+// CHECK PARENT STALENESS (Self-Healing)
+// Called periodically from loop() to detect dead parents.
+// If all parents are lost, resets rank and logs for visibility.
+// =============================================================================
+void check_parent_staleness() {
+    bool had_parents = (active_parent_count > 0);
+    
+    // Rebuild parent set (will invalidate stale candidates)
+    update_parent_set();
+    
+    // If we just lost all parents, log it prominently
+    if (had_parents && active_parent_count == 0) {
+        LOG_WARN("All parents lost! Waiting for beacons...");
+        my_rank = RANK_RELAY;  // Reset rank
+    }
 }
 
 // =============================================================================

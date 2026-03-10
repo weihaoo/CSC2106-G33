@@ -145,8 +145,7 @@ def send_response(cl, html):
             else:
                 print("Socket error:", e)
                 break
-    time.sleep(0.1)  # Flush before close
-    cl.close()
+    time.sleep(0.1)  # Flush before caller closes
 
 # ── Main Entry ──
 def main():

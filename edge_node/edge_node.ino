@@ -20,7 +20,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 // CHANGE THIS BEFORE FLASHING: EDGE-01 for Node 0x01, EDGE-06 for Node 0x06
-#define NODE_NAME "EDGE-01"
+#define NODE_NAME "EDGE-06"
 #include "logging.h"
 
 #include <Wire.h>
@@ -330,21 +330,8 @@ void receive_mesh_packets()
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // VALIDATION STAGE 3: Deduplication check
-    // ──────────────────────────────────────────────────────────────────────
-
-    if (is_duplicate(hdr->src_id, hdr->seq_num))
-    {
-        Serial.print(F("[DROP] Duplicate | src=0x"));
-        Serial.print(hdr->src_id, HEX);
-        Serial.print(F(" seq="));
-        Serial.println(hdr->seq_num);
-        packets_dropped++;
-        return;
-    }
-
-    // ──────────────────────────────────────────────────────────────────────
-    // VALIDATION STAGE 4: CRC check
+    // VALIDATION STAGE 3: CRC check (before dedup, so corrupted packets
+    // don't pollute the dedup table)
     // ──────────────────────────────────────────────────────────────────────
 
     if (!validate_mesh_crc(hdr))
@@ -358,7 +345,49 @@ void receive_mesh_packets()
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // VALIDATION STAGE 5: TTL check
+    // VALIDATION STAGE 4: Packet type — handle beacons and ACKs early
+    // (beacons must NOT go through dedup since they reuse seq_num=0)
+    // ──────────────────────────────────────────────────────────────────────
+
+    uint8_t pkt_type = GET_PKT_TYPE(hdr->flags);
+
+    if (pkt_type == PKT_TYPE_BEACON)
+    {
+        handle_beacon(hdr, rssi, snr);
+        return;
+    }
+
+    if (pkt_type == PKT_TYPE_ACK)
+    {
+        // Edge nodes don't process ACKs (we don't send data upward in mesh)
+        return;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 5: Destination check (DATA packets must be for us)
+    // ──────────────────────────────────────────────────────────────────────
+
+    if (hdr->dst_id != NODE_ID && hdr->dst_id != 0xFF)
+    {
+        return;  // Not addressed to us — ignore
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 6: Deduplication check (DATA packets only)
+    // ──────────────────────────────────────────────────────────────────────
+
+    if (is_duplicate(hdr->src_id, hdr->seq_num))
+    {
+        Serial.print(F("[DROP] Duplicate | src=0x"));
+        Serial.print(hdr->src_id, HEX);
+        Serial.print(F(" seq="));
+        Serial.println(hdr->seq_num);
+        packets_dropped++;
+        return;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // VALIDATION STAGE 6: TTL check
     // ──────────────────────────────────────────────────────────────────────
 
     if (hdr->ttl == 0)
@@ -372,31 +401,11 @@ void receive_mesh_packets()
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // PACKET VALID: Mark as seen and process by type
+    // DATA PACKET VALID: Mark as seen and process
     // ──────────────────────────────────────────────────────────────────────
 
     mark_seen(hdr->src_id, hdr->seq_num);
-
-    uint8_t pkt_type = GET_PKT_TYPE(hdr->flags);
-
-    switch (pkt_type)
-    {
-    case PKT_TYPE_BEACON:
-        handle_beacon(hdr, rssi, snr);
-        break;
-
-    case PKT_TYPE_DATA:
-        handle_data(hdr, payload, rssi, snr);
-        break;
-
-    case PKT_TYPE_ACK:
-        // Edge nodes don't process ACKs (we don't send data upward in mesh)
-        break;
-
-    default:
-        Serial.print(F("[WARN] Unknown packet type 0x"));
-        Serial.println(pkt_type, HEX);
-    }
+    handle_data(hdr, payload, rssi, snr);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -432,7 +441,7 @@ void broadcast_beacon_if_due()
     hdr.dst_id = 0xFF; // Broadcast
     hdr.prev_hop = NODE_ID;
     hdr.ttl = 1;                              // Beacons don't hop
-    hdr.seq_num = (uint8_t)(millis() / 1000); // Use time as sequence
+    hdr.seq_num = 0x00;                       // Beacons don't use sequence numbers
     hdr.rank = MY_RANK;                       // Always 0 for edge
     hdr.payload_len = BEACON_PAYLOAD_SIZE;
 
@@ -681,14 +690,19 @@ bool is_duplicate(uint8_t src_id, uint8_t seq_num)
 
     for (uint8_t i = 0; i < DEDUP_TABLE_SIZE; i++)
     {
+        if (!dedup_table[i].valid) continue;
+
+        // Expire old entries
+        if (now - dedup_table[i].timestamp > DEDUP_WINDOW_MS)
+        {
+            dedup_table[i].valid = false;
+            continue;
+        }
+
         if (dedup_table[i].src_id == src_id &&
             dedup_table[i].seq_num == seq_num)
         {
-            // Check if within dedup window (30s)
-            if (now - dedup_table[i].timestamp < DEDUP_WINDOW_MS)
-            {
-                return true;
-            }
+            return true;
         }
     }
 
@@ -700,6 +714,7 @@ void mark_seen(uint8_t src_id, uint8_t seq_num)
     dedup_table[dedup_index].src_id = src_id;
     dedup_table[dedup_index].seq_num = seq_num;
     dedup_table[dedup_index].timestamp = millis();
+    dedup_table[dedup_index].valid = true;
 
     dedup_index = (dedup_index + 1) % DEDUP_TABLE_SIZE;
 }

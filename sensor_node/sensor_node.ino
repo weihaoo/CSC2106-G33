@@ -276,9 +276,16 @@ void loop() {
       }
       Serial.println();
     } else {
-      Serial.println("TX | All retries failed. Triggering parent re-evaluation.");
-      // Trigger parent re-evaluation on next loop
+      Serial.println("TX | All retries failed. Invalidating parent and re-evaluating.");
+      // Invalidate the failed parent so it isn't immediately reselected
+      if (current_parent_idx < MAX_CANDIDATES) {
+        candidates[current_parent_idx].valid = false;
+      }
       current_parent_idx = 0xFF;
+      my_rank = RANK_SENSOR;  // Reset rank
+      update_parent_selection();
+      // Rapid beacon so downstream nodes know our topology changed
+      broadcast_beacon();
     }
   }
 }
@@ -607,6 +614,15 @@ void receive_and_process() {
     return;
   }
 
+  // --- Loop prevention: don't forward back to the node that sent it to us ---
+  if (get_parent_id() == prev_hop) {
+    Serial.print("DROP | uid=");
+    Serial.print(src_id, HEX);
+    Serial.print(seq, HEX);
+    Serial.println(" | reason=loop_detected");
+    return;
+  }
+
   forward_packet(buf, len);
 
   // Log successful forward
@@ -692,15 +708,15 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
 }
 
 // =============================================================================
-// FORWARD PACKET (Payload-Agnostic)
+// FORWARD PACKET (Payload-Agnostic, with ACK + Retry)
 //
 // The sensor-as-relay:
 //   1. Sets prev_hop = NODE_ID
 //   2. Sets PKT_FLAG_FWD in flags byte
-//   3. Clears PKT_FLAG_ACK_REQ (parent doesn't need to ACK the forward)
+//   3. Keeps PKT_FLAG_ACK_REQ so parent acknowledges receipt
 //   4. Decrements TTL by 1
 //   5. Recalculates CRC (big-endian) over modified bytes 0-7
-//   6. Copies ALL bytes (header + payload) and retransmits
+//   6. Sends with ACK + retry for reliable forwarding
 //
 // RULE: bytes MESH_HEADER_SIZE onward are NEVER inspected. They are copied
 //       as a block. The relay does not know or care what sensor type or
@@ -711,17 +727,17 @@ void forward_packet(uint8_t *buf, int len) {
   if (pending_forwards < MAX_PENDING_FORWARDS) pending_forwards++;
 
   // --- Modify only the header fields we own ---
-  buf[0] = (buf[0] | PKT_FLAG_FWD) & ~PKT_FLAG_ACK_REQ;  // set FWD, clear ACK_REQ
-  buf[2] = get_parent_id();                                 // dst = our parent
-  buf[3] = NODE_ID;                                         // prev_hop = this sensor
-  buf[4] = buf[4] - 1;                                      // decrement TTL
+  buf[0] = buf[0] | PKT_FLAG_FWD;       // set FWD, keep ACK_REQ for reliable forwarding
+  buf[2] = get_parent_id();              // dst = our parent
+  buf[3] = NODE_ID;                      // prev_hop = this sensor
+  buf[4] = buf[4] - 1;                   // decrement TTL
 
   // --- Recalculate CRC (big-endian) over modified bytes 0-7 ---
   uint16_t crc = crc16_ccitt(buf, 8);
   buf[8] = (crc >> 8) & 0xFF;
   buf[9] = crc & 0xFF;
 
-  // --- Transmit (header + payload, all bytes, no inspection of payload) ---
+  // --- Validate total length ---
   int total_len = MESH_HEADER_SIZE + buf[7];  // header + payload_len bytes
   if (total_len > len) {
     Serial.println("FWD  | ERROR: payload_len exceeds received packet length");
@@ -731,10 +747,48 @@ void forward_packet(uint8_t *buf, int len) {
     return;
   }
 
-  int state = lbt_transmit(radio, buf, total_len);
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.print("FWD  | TX failed, RadioLib code ");
-    Serial.println(state);
+  // --- Send with ACK + retry for reliable forwarding ---
+  uint8_t fwd_seq = buf[5];
+  bool success = false;
+
+  for (uint8_t attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    Serial.print("FWD  | Attempt ");
+    Serial.print(attempt);
+    Serial.print("/");
+    Serial.print(MAX_RETRIES);
+    Serial.print(" → parent=0x");
+    Serial.println(get_parent_id(), HEX);
+
+    int state = lbt_transmit(radio, buf, total_len);
+    if (state != RADIOLIB_ERR_NONE) {
+      Serial.print("FWD  | TX failed, RadioLib code ");
+      Serial.println(state);
+      delay(200);
+      continue;
+    }
+
+    // Wait for ACK from parent
+    ack_received = false;
+    ack_expected_seq = fwd_seq;
+    waiting_for_ack = true;
+
+    rxFlag = false;
+    radio.startReceive();
+
+    if (wait_for_ack(ACK_TIMEOUT_MS)) {
+      waiting_for_ack = false;
+      success = true;
+      Serial.println("FWD  | ACK received from parent");
+      break;
+    }
+
+    waiting_for_ack = false;
+    Serial.println("FWD  | No ACK, retrying...");
+    delay(100 * attempt);  // back-off
+  }
+
+  if (!success) {
+    Serial.println("FWD  | All forward retries failed — packet may be lost");
   }
 
   if (pending_forwards > 0) pending_forwards--;
@@ -935,16 +989,22 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
 
 // =============================================================================
 // UPDATE PARENT SELECTION
-// Scores all valid candidates and switches parent if a better one is found.
+// Scores all valid, non-stale candidates and switches parent if better found.
 // Hysteresis: only switch if new score is ≥ PARENT_SWITCH_HYSTERESIS better.
 // Also updates my_rank to parent.rank + 1.
+// Sends a rapid beacon if parent changes (self-organizing).
 // =============================================================================
 void update_parent_selection() {
+  uint8_t old_parent_id = get_parent_id();
   int   best_score = -1;
   uint8_t best_idx = 0xFF;
 
   for (int i = 0; i < MAX_CANDIDATES; i++) {
     if (!candidates[i].valid) continue;
+
+    // Skip stale candidates (self-healing)
+    uint32_t age = millis() - candidates[i].last_seen_ms;
+    if (age > PARENT_TIMEOUT_MS) continue;
 
     int s = score_parent(candidates[i].rank,
                          candidates[i].rssi,
@@ -988,31 +1048,48 @@ void update_parent_selection() {
       my_rank = candidates[current_parent_idx].rank + 1;
     }
   }
+
+  // Rapid beacon if parent changed (self-organizing)
+  uint8_t new_parent_id = get_parent_id();
+  if (new_parent_id != old_parent_id && new_parent_id != 0xFF) {
+    Serial.println("PARENT | Topology changed, sending rapid beacon");
+    broadcast_beacon();
+  }
 }
 
 // =============================================================================
 // CHECK PARENT TIMEOUT
 // If we haven't heard from the current parent in PARENT_TIMEOUT_MS, drop it.
+// Also cleans up stale candidates so their slots can be reused.
 // =============================================================================
 void check_parent_timeout() {
-  if (current_parent_idx == 0xFF) return;
-  if (!candidates[current_parent_idx].valid) return;
+  // Clean up all stale candidates (self-healing)
+  for (int i = 0; i < MAX_CANDIDATES; i++) {
+    if (!candidates[i].valid) continue;
+    uint32_t age = millis() - candidates[i].last_seen_ms;
+    if (age > PARENT_TIMEOUT_MS) {
+      Serial.print("PARENT | Expired stale candidate 0x");
+      Serial.println(candidates[i].node_id, HEX);
+      candidates[i].valid = false;
+      // If this was our current parent, clear it
+      if (i == current_parent_idx) {
+        current_parent_idx = 0xFF;
+        my_rank = RANK_SENSOR;  // reset rank
+      }
+    }
+  }
 
-  uint32_t age = millis() - candidates[current_parent_idx].last_seen_ms;
-  if (age > PARENT_TIMEOUT_MS) {
-    Serial.print("PARENT | Timeout on 0x");
-    Serial.print(candidates[current_parent_idx].node_id, HEX);
-    Serial.print(" (");
-    Serial.print(age / 1000);
-    Serial.println("s since last beacon). Re-evaluating...");
-
-    // Invalidate the timed-out parent
-    candidates[current_parent_idx].valid = false;
-    current_parent_idx = 0xFF;
-    my_rank = RANK_SENSOR;  // reset rank until we find a new parent
-
-    // Try to select another from remaining valid candidates
+  // If we lost our current parent, try to find a new one
+  if (current_parent_idx == 0xFF) {
     update_parent_selection();
+    if (current_parent_idx == 0xFF) {
+      // Still no parent — will keep waiting for beacons
+      static uint32_t last_orphan_log = 0;
+      if (millis() - last_orphan_log > 10000UL) {
+        last_orphan_log = millis();
+        Serial.println("PARENT | No parent available. Waiting for beacons...");
+      }
+    }
   }
 }
 
