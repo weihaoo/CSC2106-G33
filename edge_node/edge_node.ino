@@ -255,6 +255,16 @@ void loop()
             switch_to_mesh_rx();
             radio_mode = MESH_LISTEN;
         }
+#else
+        // LoRaWAN disabled: drain buffer periodically so queue% doesn't stay at 100%
+        if ((timeout_flush || buffer_flush) && agg_count > 0)
+        {
+            Serial.print(F("\n[FLUSH] LoRaWAN disabled — discarding "));
+            Serial.print(agg_count);
+            Serial.println(F(" aggregated records (would send if LoRaWAN enabled)"));
+            agg_count = 0;
+            last_flush_time = now;
+        }
 #endif
     }
     else

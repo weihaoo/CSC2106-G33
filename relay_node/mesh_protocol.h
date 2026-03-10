@@ -17,11 +17,11 @@
 // LORA RADIO PARAMETERS (AS923, Singapore — all nodes must match exactly)
 // ════════════════════════════════════════════════════════════════════════════
 
-#define LORA_FREQUENCY      923.0   // MHz (AS923 for Singapore)
+#define LORA_FREQUENCY      920.8   // MHz (AS923 band — offset from default to avoid interference)
 #define LORA_SPREADING      7       // SF7
 #define LORA_BANDWIDTH      125.0   // kHz
 #define LORA_CODING_RATE    5       // 4/5
-#define LORA_SYNC_WORD      0x12    // Private network sync word
+#define LORA_SYNC_WORD      0x33    // Group 33 unique sync word (default 0x12 conflicts with neighbors)
 #define LORA_TX_POWER       11      // dBm
 
 // ════════════════════════════════════════════════════════════════════════════
