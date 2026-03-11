@@ -73,14 +73,16 @@ bool lorawan_enabled = false;
 // AGGREGATION BUFFER (stores up to 7 sensor readings)
 // ════════════════════════════════════════════════════════════════════════════
 
+#define MAX_OPAQUE_PAYLOAD 32  // Max payload bytes we'll store (any sensor type)
+
 struct AggRecord
 {
     uint8_t mesh_src_id;
     uint8_t mesh_seq;
-    uint8_t sensor_type_hint;
     uint8_t hop_estimate;
     uint16_t edge_uptime_s;
-    uint8_t opaque_payload[7];
+    uint8_t opaque_len;                    // Actual payload length from mesh header
+    uint8_t opaque_payload[MAX_OPAQUE_PAYLOAD]; // Raw payload bytes (sensor-agnostic)
     bool valid;
 };
 
@@ -522,16 +524,20 @@ void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
     // ADD TO AGGREGATION BUFFER (PHASE 4)
     // ──────────────────────────────────────────────────────────────────────
 
-    if (agg_count < MAX_AGG_RECORDS && hdr->payload_len == SENSOR_PAYLOAD_SIZE)
+    // Accept any payload length (payload-agnostic), clamp to max buffer size
+    uint8_t copy_len = hdr->payload_len;
+    if (copy_len > MAX_OPAQUE_PAYLOAD) copy_len = MAX_OPAQUE_PAYLOAD;
+
+    if (agg_count < MAX_AGG_RECORDS && copy_len > 0)
     {
         AggRecord *rec = &agg_buffer[agg_count];
 
         rec->mesh_src_id = hdr->src_id;
         rec->mesh_seq = hdr->seq_num;
-        rec->sensor_type_hint = SENSOR_TYPE_DHT22;
         rec->hop_estimate = hop_count;
         rec->edge_uptime_s = (millis() - boot_time) / 1000;
-        memcpy(rec->opaque_payload, payload, SENSOR_PAYLOAD_SIZE);
+        rec->opaque_len = copy_len;
+        memcpy(rec->opaque_payload, payload, copy_len);
         rec->valid = true;
 
         agg_count++;
@@ -543,7 +549,7 @@ void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
     }
     else
     {
-        Serial.println(F("[WARN] Aggregation buffer full or invalid payload length"));
+        Serial.println(F("[WARN] Aggregation buffer full or zero-length payload"));
     }
 
     Serial.println(F("────────────────────────────────────────────────────"));
@@ -600,7 +606,7 @@ void send_lorawan_uplink()
     // PACK BRIDGEAGGV1 FORMAT
     // ──────────────────────────────────────────────────────────────────────
 
-    uint8_t uplink_buf[3 + (MAX_AGG_RECORDS * BRIDGE_RECORD_SIZE)];
+    uint8_t uplink_buf[242]; // Max AS923 LoRaWAN payload size for SF7 is ~242 bytes
     uint8_t idx = 0;
 
     // Header (3 bytes)
@@ -618,13 +624,12 @@ void send_lorawan_uplink()
 
         uplink_buf[idx++] = rec->mesh_src_id;
         uplink_buf[idx++] = rec->mesh_seq;
-        uplink_buf[idx++] = rec->sensor_type_hint;
         uplink_buf[idx++] = rec->hop_estimate;
         uplink_buf[idx++] = (rec->edge_uptime_s >> 8) & 0xFF; // High byte
         uplink_buf[idx++] = rec->edge_uptime_s & 0xFF;        // Low byte
-        uplink_buf[idx++] = SENSOR_PAYLOAD_SIZE;              // opaque_len
-        memcpy(&uplink_buf[idx], rec->opaque_payload, SENSOR_PAYLOAD_SIZE);
-        idx += SENSOR_PAYLOAD_SIZE;
+        uplink_buf[idx++] = rec->opaque_len;                   // actual payload length
+        memcpy(&uplink_buf[idx], rec->opaque_payload, rec->opaque_len);
+        idx += rec->opaque_len;
     }
 
     Serial.println(F("\n════════════════════════════════════════════════════"));
