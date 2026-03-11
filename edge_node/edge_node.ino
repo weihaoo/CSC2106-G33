@@ -139,10 +139,57 @@ void setup()
 
     delay(100);
 
-    // Initialize RadioLib for mesh
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 3: LORAWAN OTAA JOIN (BEFORE mesh init — radio must be clean)
+    // LoRaWAN uses sync word 0x34; mesh uses 0x33. If mesh inits first,
+    // the Join Accept from TTN is invisible to the radio.
+    // ──────────────────────────────────────────────────────────────────────
+
+#ifdef ENABLE_LORAWAN
+    Serial.println(F("\n[INIT] Starting LoRaWAN OTAA join..."));
+    Serial.print(F("     DevEUI: "));
+    Serial.println((unsigned long)DEV_EUI, HEX);
+    Serial.print(F("     JoinEUI: "));
+    Serial.println((unsigned long)JOIN_EUI, HEX);
+
+    // Begin LoRaWAN with OTAA (radio is fresh, no mesh settings to conflict)
+    int state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
+    if (state != RADIOLIB_ERR_NONE)
+    {
+        Serial.print(F("[ERROR] LoRaWAN begin failed, code "));
+        Serial.println(state);
+    }
+
+    // Attempt OTAA join (blocking, up to 60s)
+    state = lorawan_node.activateOTAA();
+    if (state == RADIOLIB_ERR_NONE)
+    {
+        Serial.println(F("[OK] LoRaWAN OTAA join successful!"));
+        lorawan_joined = true;
+    }
+    else
+    {
+        Serial.print(F("[WARN] LoRaWAN join failed, code "));
+        Serial.println(state);
+        Serial.println(F("     Will retry on next uplink attempt"));
+    }
+
+    lorawan_enabled = true;
+#else
+    Serial.println(F("\n[INIT] LoRaWAN DISABLED (mesh-only testing mode)"));
+#endif
+
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 4: Initialize radio for mesh (after LoRaWAN join completes)
+    // ──────────────────────────────────────────────────────────────────────
+
     LOG_INFO("Initializing RadioLib for mesh...");
 
+#ifdef ENABLE_LORAWAN
+    state = radio.begin(LORA_FREQUENCY);
+#else
     int state = radio.begin(LORA_FREQUENCY);
+#endif
     if (state != RADIOLIB_ERR_NONE)
     {
         LOG_ERROR("RadioLib init failed");
@@ -168,47 +215,6 @@ void setup()
     // Start receiving mesh packets
     rxFlag = false;
     radio.startReceive();
-
-    // ──────────────────────────────────────────────────────────────────────
-    // PHASE 3: LORAWAN OTAA JOIN (only if ENABLE_LORAWAN is defined)
-    // ──────────────────────────────────────────────────────────────────────
-
-#ifdef ENABLE_LORAWAN
-    Serial.println(F("\n[INIT] Starting LoRaWAN OTAA join..."));
-    Serial.print(F("     DevEUI: "));
-    Serial.println((unsigned long)DEV_EUI, HEX);
-    Serial.print(F("     JoinEUI: "));
-    Serial.println((unsigned long)JOIN_EUI, HEX);
-
-    // Begin LoRaWAN with OTAA
-    state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
-    if (state != RADIOLIB_ERR_NONE)
-    {
-        Serial.print(F("[ERROR] LoRaWAN begin failed, code "));
-        Serial.println(state);
-    }
-
-    // Attempt OTAA join (blocking, up to 60s)
-    state = lorawan_node.activateOTAA();
-    if (state == RADIOLIB_ERR_NONE)
-    {
-        Serial.println(F("[OK] LoRaWAN OTAA join successful!"));
-        lorawan_joined = true;
-    }
-    else
-    {
-        Serial.print(F("[WARN] LoRaWAN join failed, code "));
-        Serial.println(state);
-        Serial.println(F("     Will retry on next uplink attempt"));
-    }
-
-    lorawan_enabled = true;
-    // Switch radio back to mesh mode after join
-    switch_to_mesh_rx();
-#else
-    Serial.println(F("\n[INIT] LoRaWAN DISABLED (mesh-only testing mode)"));
-
-#endif
 
     // ──────────────────────────────────────────────────────────────────────
     // INITIALIZATION COMPLETE
