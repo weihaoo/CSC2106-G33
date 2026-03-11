@@ -140,9 +140,26 @@ void setup()
     delay(100);
 
     // ──────────────────────────────────────────────────────────────────────
-    // PHASE 3: LORAWAN OTAA JOIN (BEFORE mesh init — radio must be clean)
-    // LoRaWAN uses sync word 0x34; mesh uses 0x33. If mesh inits first,
-    // the Join Accept from TTN is invisible to the radio.
+    // PHASE 3: Initialize radio hardware (must happen before any radio use)
+    // ──────────────────────────────────────────────────────────────────────
+
+    LOG_INFO("Initializing SX1262 radio hardware...");
+
+    int state = radio.begin();
+    if (state != RADIOLIB_ERR_NONE)
+    {
+        LOG_ERROR("RadioLib init failed");
+        sprintf(buf, "Error code: %d", state);
+        LOG_ERROR(buf);
+        while (true)
+            delay(1000);
+    }
+    LOG_OK("SX1262 hardware initialized");
+
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 4: LORAWAN OTAA JOIN (radio is initialized but no mesh params)
+    // LoRaWAN uses sync word 0x34; mesh uses 0x33. We must join before
+    // setting mesh params, otherwise the Join Accept is invisible.
     // ──────────────────────────────────────────────────────────────────────
 
 #ifdef ENABLE_LORAWAN
@@ -152,15 +169,15 @@ void setup()
     Serial.print(F("     JoinEUI: "));
     Serial.println((unsigned long)JOIN_EUI, HEX);
 
-    // Begin LoRaWAN with OTAA (radio is fresh, no mesh settings to conflict)
-    int state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
+    // Begin LoRaWAN with OTAA (radio hardware ready, no mesh sync word set)
+    state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
     if (state != RADIOLIB_ERR_NONE)
     {
         Serial.print(F("[ERROR] LoRaWAN begin failed, code "));
         Serial.println(state);
     }
 
-    // Attempt OTAA join (blocking, up to 60s)
+    // Attempt OTAA join (blocking, waits for RX1/RX2 windows)
     state = lorawan_node.activateOTAA();
     if (state == RADIOLIB_ERR_NONE)
     {
@@ -180,25 +197,12 @@ void setup()
 #endif
 
     // ──────────────────────────────────────────────────────────────────────
-    // PHASE 4: Initialize radio for mesh (after LoRaWAN join completes)
+    // PHASE 5: Configure radio for mesh (after LoRaWAN join completes)
     // ──────────────────────────────────────────────────────────────────────
 
-    LOG_INFO("Initializing RadioLib for mesh...");
+    LOG_INFO("Configuring radio for mesh...");
 
-#ifdef ENABLE_LORAWAN
-    state = radio.begin(LORA_FREQUENCY);
-#else
-    int state = radio.begin(LORA_FREQUENCY);
-#endif
-    if (state != RADIOLIB_ERR_NONE)
-    {
-        LOG_ERROR("RadioLib init failed");
-        sprintf(buf, "Error code: %d", state);
-        LOG_ERROR(buf);
-        while (true)
-            delay(1000);
-    }
-
+    radio.setFrequency(LORA_FREQUENCY);
     radio.setSpreadingFactor(LORA_SPREADING);
     radio.setBandwidth(LORA_BANDWIDTH);
     radio.setCodingRate(LORA_CODING_RATE);
