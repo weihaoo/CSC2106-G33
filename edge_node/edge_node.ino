@@ -145,7 +145,7 @@ void setup()
 
     LOG_INFO("Initializing SX1262 radio hardware...");
 
-    int state = radio.begin();
+    int state = radio.begin(923.2);  // AS923 default join freq (not 434 MHz default!)
     if (state != RADIOLIB_ERR_NONE)
     {
         LOG_ERROR("RadioLib init failed");
@@ -169,8 +169,9 @@ void setup()
     Serial.print(F("     JoinEUI: "));
     Serial.println((unsigned long)JOIN_EUI, HEX);
 
-    // Begin LoRaWAN with OTAA (radio hardware ready, no mesh sync word set)
-    state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, nullptr, APP_KEY);
+    // Begin LoRaWAN with OTAA
+    // RadioLib 7.x requires both nwkKey and appKey — for LoRaWAN 1.0.x they are the same
+    state = lorawan_node.beginOTAA(JOIN_EUI, DEV_EUI, APP_KEY, APP_KEY);
     if (state != RADIOLIB_ERR_NONE)
     {
         Serial.print(F("[ERROR] LoRaWAN begin failed, code "));
@@ -179,7 +180,7 @@ void setup()
 
     // Attempt OTAA join (blocking, waits for RX1/RX2 windows)
     state = lorawan_node.activateOTAA();
-    if (state == RADIOLIB_ERR_NONE)
+    if (state == RADIOLIB_LORAWAN_NEW_SESSION)
     {
         Serial.println(F("[OK] LoRaWAN OTAA join successful!"));
         lorawan_joined = true;
