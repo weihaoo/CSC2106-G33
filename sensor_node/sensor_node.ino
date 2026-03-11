@@ -37,7 +37,7 @@
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
 // -----------------------------------------------------------------------------
-#define TX_INTERVAL_MS        30000UL   // 30s during development (change to 120000UL for final)
+#define TX_INTERVAL_MS        5000UL   // 30s during development (change to 120000UL for final)
 
 // Beacon phase offset — spreads beacons/transmissions to avoid collisions
 #define BEACON_PHASE_OFFSET_MS  ((NODE_ID % 5) * 2000UL)
@@ -54,7 +54,7 @@
 // Set SIMULATION_MODE to false to use real DHT22 sensor data.
 // Set SIMULATION_MODE to true  to use random simulated data.
 // -----------------------------------------------------------------------------
-#define SIMULATION_MODE true
+#define SIMULATION_MODE false
 
 #include <DHT.h>
 #define DHT_PIN  4

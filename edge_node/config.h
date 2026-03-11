@@ -12,7 +12,7 @@
 
 // For Edge 1 (primary): use 0x01
 // For Edge 2 (standby): use 0x06
-#define NODE_ID 0x6
+#define NODE_ID 0x06
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORAWAN OTAA CREDENTIALS (from Person 4 / TTN Console)
@@ -28,23 +28,24 @@
 // AppKey: MSB byte order (same as TTN console shows)
 // Example: TTN shows 0123456789ABCDEF... → enter as {0x01, 0x23, 0x45, ...}
 
-// Edge 1 credentials (replace with actual values from TTN)
+// Edge 1 credentials (TODO: register Edge 1 on TTN and fill in)
 #if NODE_ID == 0x01
-    #define DEV_EUI  0x0000000000000000ULL  // TODO: Replace with actual DevEUI (LSB)
-    #define JOIN_EUI 0x0000000000000000ULL  // Usually all zeros for TTN
+    #define DEV_EUI  0x0000000000000000ULL  // TODO: Replace with Edge 1 DevEUI (LSB order)
+    #define JOIN_EUI 0x0000000000000000ULL
     uint8_t APP_KEY[] = {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };  // TODO: Replace with actual AppKey from TTN (MSB order)
+    };  // TODO: Replace with Edge 1 AppKey from TTN (MSB order)
 
-// Edge 2 credentials (replace with actual values from TTN)
+// Edge 2 credentials — TTN DevEUI: 70B3D57ED007639E (AS923, au1 cluster)
 #elif NODE_ID == 0x06
-    #define DEV_EUI  0x0000000000000000ULL  // TODO: Replace with actual DevEUI (LSB)
-    #define JOIN_EUI 0x0000000000000000ULL  // Usually all zeros for TTN
+    // DevEUI reversed to LSB for RadioLib (TTN shows MSB: 70B3D57ED007639E)
+    #define DEV_EUI  0x70B3D57ED007639EULL
+    #define JOIN_EUI 0x0000000000000000ULL
     uint8_t APP_KEY[] = {
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };  // TODO: Replace with actual AppKey from TTN (MSB order)
+        0x09, 0x0C, 0xAE, 0x43, 0x7E, 0x36, 0x22, 0x0B,
+        0x66, 0x45, 0x97, 0x97, 0x96, 0xE1, 0xD9, 0xFE
+    };  // AppKey MSB — copied exactly as shown in TTN console
 #else
     #error "Invalid NODE_ID! Must be 0x01 (Edge 1) or 0x06 (Edge 2)"
 #endif
