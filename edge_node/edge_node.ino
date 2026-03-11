@@ -192,6 +192,10 @@ void setup()
         Serial.println(F("     Will retry on next uplink attempt"));
     }
 
+    // Set DR5 (SF7/BW125) — default join DR2 (SF10) exceeds AS923 400ms dwell time
+    // for our 94-byte payload. DR5 supports up to ~242 bytes within dwell limits.
+    lorawan_node.setDatarate(5);
+
     lorawan_enabled = true;
 #else
     Serial.println(F("\n[INIT] LoRaWAN DISABLED (mesh-only testing mode)"));
@@ -201,14 +205,20 @@ void setup()
     // PHASE 5: Configure radio for mesh (after LoRaWAN join completes)
     // ──────────────────────────────────────────────────────────────────────
 
-    LOG_INFO("Configuring radio for mesh...");
+    LOG_INFO("Reinitializing radio for mesh...");
 
-    radio.setFrequency(LORA_FREQUENCY);
-    radio.setSpreadingFactor(LORA_SPREADING);
-    radio.setBandwidth(LORA_BANDWIDTH);
-    radio.setCodingRate(LORA_CODING_RATE);
-    radio.setSyncWord(LORA_SYNC_WORD);
-    radio.setOutputPower(LORA_TX_POWER);
+    // Full reinit to cleanly reset all SX1262 registers after LoRaWAN join
+    // (individual set calls don't fully undo what LoRaWAN changed internally)
+    state = radio.begin(LORA_FREQUENCY, LORA_BANDWIDTH, LORA_SPREADING,
+                        LORA_CODING_RATE, LORA_SYNC_WORD, LORA_TX_POWER);
+    if (state != RADIOLIB_ERR_NONE)
+    {
+        LOG_ERROR("Radio mesh reinit failed");
+        sprintf(buf, "Error code: %d", state);
+        LOG_ERROR(buf);
+        while (true)
+            delay(1000);
+    }
 
     sprintf(buf, "Radio ready: %.1f MHz, SF%d, BW%.0f kHz",
             LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
@@ -267,6 +277,15 @@ void loop()
             send_lorawan_uplink();
             switch_to_mesh_rx();
             radio_mode = MESH_LISTEN;
+        }
+        else if ((timeout_flush || buffer_flush) && agg_count > 0 && !lorawan_joined)
+        {
+            // LoRaWAN join failed: drain buffer so queue% doesn't stay at 100%
+            Serial.print(F("\n[FLUSH] LoRaWAN not joined — discarding "));
+            Serial.print(agg_count);
+            Serial.println(F(" records"));
+            agg_count = 0;
+            last_flush_time = now;
         }
 #else
         // LoRaWAN disabled: drain buffer periodically so queue% doesn't stay at 100%
@@ -692,14 +711,11 @@ void send_lorawan_uplink()
 
 void switch_to_mesh_rx()
 {
-    // Reconfigure radio back to mesh LoRa parameters
-    radio.setFrequency(LORA_FREQUENCY);
-    radio.setSpreadingFactor(LORA_SPREADING);
-    radio.setBandwidth(LORA_BANDWIDTH);
-    radio.setCodingRate(LORA_CODING_RATE);
-    radio.setSyncWord(LORA_SYNC_WORD);
-    radio.setOutputPower(LORA_TX_POWER);
+    // Full reinit to cleanly reset SX1262 after LoRaWAN TX
+    radio.begin(LORA_FREQUENCY, LORA_BANDWIDTH, LORA_SPREADING,
+                LORA_CODING_RATE, LORA_SYNC_WORD, LORA_TX_POWER);
 
+    radio.setDio1Action(setRxFlag);
     rxFlag = false;
     radio.startReceive();
 

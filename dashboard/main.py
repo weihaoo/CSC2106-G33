@@ -10,10 +10,14 @@ WIFI_PASS = "12345678"
 # For local testing, use the public test broker with no auth.
 # Change TTN_SERVER back to "as1.cloud.thethings.network" and fill in TTN_API_KEY
 # when connecting to real TTN.
-TTN_APP_ID  = "csc2106-g33-mesh"
-TTN_API_KEY = ""
-TTN_SERVER  = "test.mosquitto.org"
-TOPIC       = "csc2106-g33-dashboard-test/v3/csc2106-g33-mesh@ttn/devices/mock-edge-01/up"
+TTN_APP_ID  = "sit-csc2106-g33"
+TTN_API_KEY = "NNSXS.NRPKTDG3KGMLAO2KY37ZYTMJDKEN3CJMKZLCA7A.V7MH2LTQZSABZ6RZHOCQXSJBKZXLMK5U7BK7NBBLGED2DBNXRVFA"
+TTN_SERVER  = "au1.cloud.thethings.network"
+
+# Wildcard '+' subscribes to ALL edge devices (edge-01, edge-06, etc.)
+TOPIC_TEST  = "csc2106-g33-dashboard-test/v3/sit-csc2106-g33@ttn/devices/+/up"
+TOPIC_TTN   = "v3/" + TTN_APP_ID + "@ttn/devices/+/up"
+TOPIC       = TOPIC_TTN if TTN_API_KEY else TOPIC_TEST
 
 # ── State ──
 nodes = {}  # keyed by src_id string
