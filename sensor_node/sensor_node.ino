@@ -41,7 +41,6 @@
 
 // Beacon phase offset — spreads beacons/transmissions to avoid collisions
 #define BEACON_PHASE_OFFSET_MS  ((NODE_ID % 5) * 2000UL)
-
 // -----------------------------------------------------------------------------
 // LoRa RADIO PINS (T-Beam SX1262)
 // -----------------------------------------------------------------------------
@@ -51,14 +50,16 @@
 #define RADIO_BUSY  32
 
 // -----------------------------------------------------------------------------
-// DUMMY SENSOR CONFIG
-// NOTE: Replace this section with real DHT22 code when sensor is available.
-//       See commented-out DHT22 section below.
+// DHT22 SENSOR CONFIG
+// Set SIMULATION_MODE to false to use real DHT22 sensor data.
+// Set SIMULATION_MODE to true  to use random simulated data.
 // -----------------------------------------------------------------------------
-// #include <DHT.h>
-// #define DHT_PIN  13
-// #define DHT_TYPE DHT22
-// DHT dht(DHT_PIN, DHT_TYPE);
+#define SIMULATION_MODE true
+
+#include <DHT.h>
+#define DHT_PIN  4
+#define DHT_TYPE DHT22
+DHT dht(DHT_PIN, DHT_TYPE);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DIO1 RECEIVE INTERRUPT FLAG
@@ -178,9 +179,15 @@ void setup() {
           LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
   LOG_OK(buf);
 
-  // Uncomment when using real DHT22:
-  // dht.begin();
-  // delay(2000);  // DHT22 needs 2s after power-on before first read
+#if SIMULATION_MODE
+  randomSeed(analogRead(0));
+  LOG_INFO("WARNING: Running in SIMULATION MODE — using random temp/humidity data");
+  LOG_INFO("         Fix DHT22 wiring and set SIMULATION_MODE to false for real data");
+#else
+  dht.begin();
+  delay(2000);  // DHT22 needs 2s after power-on before first read
+  LOG_OK("DHT22 initialized on GPIO 4");
+#endif
 
   // Apply beacon phase offset
   sprintf(buf, "Beacon phase offset: %lu ms", BEACON_PHASE_OFFSET_MS);
@@ -330,23 +337,26 @@ void init_radio() {
 
 // =============================================================================
 // SENSOR READ
-// Currently returns dummy data. Replace with real DHT22 read when ready.
+// Reads temperature and humidity. Uses random data in SIMULATION_MODE,
+// real DHT22 data otherwise.
 // =============================================================================
 bool read_sensor(float &temp, float &hum) {
-  // --- DUMMY DATA (remove when DHT22 is wired up) ---
-  temp = 24.0 + (float)(random(-20, 60)) / 10.0;  // 22.0–30.0°C range
-  hum  = 60.0 + (float)(random(-100, 200)) / 10.0; // 50.0–80.0% range
+#if SIMULATION_MODE
+  // Generate random but realistic values
+  temp = 20.0 + (random(0, 151) / 10.0);   // 20.0–35.0 °C
+  hum  = 50.0 + (random(0, 401) / 10.0);   // 50.0–90.0 %
   return true;
-
-  // --- REAL DHT22 (uncomment when sensor is ready) ---
-  // float t = dht.readTemperature();
-  // float h = dht.readHumidity();
-  // if (isnan(t) || isnan(h)) {
-  //   return false;
-  // }
-  // temp = t;
-  // hum  = h;
-  // return true;
+#else
+  // REAL DHT22 SENSOR
+  float t_sensor = dht.readTemperature();
+  float h_sensor = dht.readHumidity();
+  if (isnan(t_sensor) || isnan(h_sensor)) {
+    return false;
+  }
+  temp = t_sensor;
+  hum  = h_sensor;
+  return true;
+#endif
 }
 
 // =============================================================================
