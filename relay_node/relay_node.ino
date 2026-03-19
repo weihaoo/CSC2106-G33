@@ -310,6 +310,11 @@ void receive_and_process() {
         char msg[64];
         sprintf(msg, "Duplicate packet #%d from %s", seq, node_name(src_id));
         LOG_DROP(msg);
+
+        // Re-ACK: the sender retried because our earlier ACK was lost
+        if (flags & PKT_FLAG_ACK_REQ) {
+            send_ack(buf[3], seq);  // buf[3] = prev_hop
+        }
         return;
     }
     

@@ -548,6 +548,16 @@ void receive_and_process() {
       if (received_crc == computed_crc) {
         process_beacon(buf, len, rssi);
       }
+    } else {
+      // Log that we heard the beacon but filtered it — helps debug connectivity
+      Serial.print("BCN | FILTERED src=0x");
+      Serial.print(src_id, HEX);
+      Serial.print(" | rank=");
+      Serial.print(rank);
+      Serial.print(" (my_rank=");
+      Serial.print(my_rank);
+      Serial.print(") | rssi=");
+      Serial.println(rssi);
     }
     return;  // beacons are never forwarded
   }
@@ -584,6 +594,11 @@ void receive_and_process() {
     Serial.print(src_id, HEX);
     Serial.print(seq, HEX);
     Serial.println(" | reason=duplicate");
+
+    // Re-ACK: the sender retried because our earlier ACK was lost
+    if (flags & PKT_FLAG_ACK_REQ) {
+      send_ack(prev_hop, seq);
+    }
     return;
   }
 

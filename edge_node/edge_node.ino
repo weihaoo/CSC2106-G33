@@ -425,6 +425,12 @@ void receive_mesh_packets()
         Serial.print(F(" seq="));
         Serial.println(hdr->seq_num);
         packets_dropped++;
+
+        // Re-ACK: the sender retried because our earlier ACK was lost
+        if (IS_ACK_REQUESTED(hdr->flags))
+        {
+            send_ack(hdr->prev_hop, hdr->seq_num);
+        }
         return;
     }
 
