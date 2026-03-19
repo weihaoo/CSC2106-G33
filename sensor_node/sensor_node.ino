@@ -32,7 +32,7 @@
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION — Change before flashing!
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x02    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
@@ -539,9 +539,21 @@ void receive_and_process() {
 
   // ---- BEACON ----
   if (pkt_type == PKT_TYPE_BEACON) {
-    // Only accept beacons from nodes with lower rank (closer to edge)
-    // This prevents routing loops
-    if (rank < my_rank) {
+    // Extract parent_health from beacon payload to distinguish
+    // "sensor with a route" (health>0) from "orphaned sensor" (health=0)
+    uint8_t beacon_health = 0;
+    if (len >= MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE && pay_len >= BEACON_PAYLOAD_SIZE) {
+      beacon_health = buf[MESH_HEADER_SIZE + 3];  // parent_health byte
+    }
+
+    // Accept beacons from:
+    //   1. Lower rank (always — closer to edge), OR
+    //   2. Same rank with a valid parent, when we have no parent
+    //      (allows sensor-to-sensor relay without creating loops)
+    bool accept = (rank < my_rank) ||
+                  (rank == my_rank && beacon_health > 0 && !has_valid_parent());
+
+    if (accept) {
       // Validate CRC before processing
       uint16_t received_crc = ((uint16_t)buf[8] << 8) | buf[9];
       uint16_t computed_crc = crc16_ccitt(buf, 8);
@@ -556,7 +568,9 @@ void receive_and_process() {
       Serial.print(rank);
       Serial.print(" (my_rank=");
       Serial.print(my_rank);
-      Serial.print(") | rssi=");
+      Serial.print(") | health=");
+      Serial.print(beacon_health);
+      Serial.print(" | rssi=");
       Serial.println(rssi);
     }
     return;  // beacons are never forwarded
