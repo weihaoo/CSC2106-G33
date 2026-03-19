@@ -30,11 +30,11 @@
 
 // Edge 1 credentials (TODO: register Edge 1 on TTN and fill in)
 #if NODE_ID == 0x01
-    #define DEV_EUI  0x0000000000000000ULL  // TODO: Replace with Edge 1 DevEUI (LSB order)
+    #define DEV_EUI  0x70B3D57ED0076677ULL  // TODO: Replace with Edge 1 DevEUI (LSB order)
     #define JOIN_EUI 0x0000000000000000ULL
     uint8_t APP_KEY[] = {
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        0x19, 0xC6, 0x63, 0xA9, 0x61, 0x96, 0x9D, 0xF1,
+        0x59, 0x8A, 0x31, 0x17, 0x9F, 0x8C, 0x1C, 0x9F
     };  // TODO: Replace with Edge 1 AppKey from TTN (MSB order)
 
 // Edge 2 credentials — TTN DevEUI: 70B3D57ED007639E (AS923, au1 cluster)
