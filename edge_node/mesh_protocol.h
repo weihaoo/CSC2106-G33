@@ -29,7 +29,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 #define BEACON_INTERVAL_MS       10000UL   // How often nodes broadcast beacons
-#define ACK_TIMEOUT_MS           600       // How long to wait for a hop ACK
+#define ACK_TIMEOUT_MS           1500      // How long to wait for a hop ACK (needs headroom for LBT delays)
 #define PARENT_TIMEOUT_MS        35000UL   // Declare parent dead after this (3+ missed beacons)
 #define MAX_RETRIES              3         // Max TX attempts per packet
 #define DEFAULT_TTL              10        // Starting TTL (max hops)
