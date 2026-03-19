@@ -296,6 +296,15 @@ void receive_and_process() {
             sprintf(msg, "Received ACK for fwd #%d from %s", seq, node_name(src_id));
             LOG_ACK(msg);
             ack_received = true;
+
+            // Refresh parent liveness: an ACK from our parent proves it's alive,
+            // even if we missed its beacons due to channel congestion
+            for (int i = 0; i < MAX_CANDIDATES; i++) {
+                if (candidates[i].valid && candidates[i].node_id == src_id) {
+                    candidates[i].last_seen_ms = millis();
+                    break;
+                }
+            }
         }
         return;
     }

@@ -21,7 +21,7 @@
 // =============================================================================
 
 // CHANGE THIS BEFORE FLASHING: Sensor 1 = SENSOR-03, Sensor 2 = SENSOR-04
-#define NODE_NAME "SENSOR-03"
+#define NODE_NAME "SENSOR-02"
 #include "logging.h"
 
 #include <Wire.h>
@@ -32,7 +32,7 @@
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION — Change before flashing!
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x03    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x02    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
@@ -577,6 +577,15 @@ void receive_and_process() {
       Serial.print("ACK | Received from 0x");
       Serial.println(src_id, HEX);
       ack_received = true;
+
+      // Refresh parent liveness: an ACK from our parent proves it's alive,
+      // even if we missed its beacons due to channel congestion
+      for (int i = 0; i < MAX_CANDIDATES; i++) {
+        if (candidates[i].valid && candidates[i].node_id == src_id) {
+          candidates[i].last_seen_ms = millis();
+          break;
+        }
+      }
     }
     return;  // ACKs are never forwarded
   }
