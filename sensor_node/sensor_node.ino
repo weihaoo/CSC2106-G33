@@ -650,27 +650,28 @@ void receive_and_process() {
   // --- Record in dedup table (after all validations pass) ---
   record_dedup(src_id, seq);
 
-  // --- ACK the sender BEFORE forwarding ---
-  if (flags & PKT_FLAG_ACK_REQ) {
-    send_ack(prev_hop, seq);  // ACK goes to prev_hop
-  }
-
-  // --- Forward the packet (payload-agnostic) ---
+  // --- Validate forwarding is possible BEFORE ACKing ---
+  // If we ACK first and then can't forward, the sender thinks
+  // delivery succeeded and never retries — silent data loss.
   if (!has_valid_parent()) {
     Serial.print("DROP | uid=");
     Serial.print(src_id, HEX);
     Serial.print(seq, HEX);
-    Serial.println(" | reason=no_parent");
+    Serial.println(" | reason=no_parent (NOT ACKing)");
     return;
   }
 
-  // --- Loop prevention: don't forward back to the node that sent it to us ---
   if (get_parent_id() == prev_hop) {
     Serial.print("DROP | uid=");
     Serial.print(src_id, HEX);
     Serial.print(seq, HEX);
     Serial.println(" | reason=loop_detected");
     return;
+  }
+
+  // --- ACK the sender — we have a valid forwarding path ---
+  if (flags & PKT_FLAG_ACK_REQ) {
+    send_ack(prev_hop, seq);
   }
 
   forward_packet(buf, len);
@@ -772,6 +773,14 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
 //       payload format is inside. This is the payload-agnostic guarantee.
 // =============================================================================
 void forward_packet(uint8_t *buf, int len) {
+  // Save outer ACK state — this function uses the same globals for its own
+  // ACK wait. If we're called from inside wait_for_ack() (nested forwarding),
+  // we must restore these afterwards so the caller's send_with_ack() retry
+  // loop isn't corrupted.
+  bool     saved_waiting   = waiting_for_ack;
+  bool     saved_ack_rcvd  = ack_received;
+  uint8_t  saved_ack_seq   = ack_expected_seq;
+
   // Track pending forwards for beacon queue_pct
   if (pending_forwards < MAX_PENDING_FORWARDS) pending_forwards++;
 
@@ -791,6 +800,9 @@ void forward_packet(uint8_t *buf, int len) {
   if (total_len > len) {
     Serial.println("FWD  | ERROR: payload_len exceeds received packet length");
     if (pending_forwards > 0) pending_forwards--;
+    waiting_for_ack  = saved_waiting;
+    ack_received     = saved_ack_rcvd;
+    ack_expected_seq = saved_ack_seq;
     radio.startReceive();
     return;
   }
@@ -839,6 +851,11 @@ void forward_packet(uint8_t *buf, int len) {
   }
 
   if (pending_forwards > 0) pending_forwards--;
+
+  // Restore outer ACK state so the caller's send_with_ack() isn't corrupted
+  waiting_for_ack  = saved_waiting;
+  ack_received     = saved_ack_rcvd;
+  ack_expected_seq = saved_ack_seq;
 
   // Return to receive mode
   radio.startReceive();

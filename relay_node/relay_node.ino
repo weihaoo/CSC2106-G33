@@ -348,21 +348,27 @@ void receive_and_process() {
     
     // Record in dedup table
     record_dedup(src_id, seq);
-    
-    // ACK the sender
-    if (flags & PKT_FLAG_ACK_REQ) {
-        send_ack(buf[3], seq);
-    }
-    
-    // Loop prevention: don't forward back to the node that sent it to us
+
+    // Validate forwarding is possible BEFORE ACKing the sender.
+    // If we ACK first and then fail to forward, the sender thinks
+    // delivery succeeded and never retries — silent data loss.
     uint8_t fwd_target = select_parent_for_packet();
+    if (fwd_target == 0xFF) {
+        LOG_DROP("No active parents in DAG set — NOT ACKing sender");
+        return;  // sender will retry or find another route
+    }
     if (fwd_target == buf[3]) {  // buf[3] = prev_hop
         char msg[64];
         sprintf(msg, "Loop detected: would forward #%d back to %s", seq, node_name(fwd_target));
         LOG_DROP(msg);
         return;
     }
-    
+
+    // ACK the sender — we have a valid forwarding path
+    if (flags & PKT_FLAG_ACK_REQ) {
+        send_ack(buf[3], seq);
+    }
+
     // Forward the packet (DAG selection with ACK + retry)
     forward_packet(buf, len);
 }
