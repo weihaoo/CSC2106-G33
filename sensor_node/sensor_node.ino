@@ -1009,7 +1009,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 // rssi_score  : maps RSSI [-120, -60] → [0, 100]
 // queue_pct   : lower is better; contribution = 15 × (100 - queue_pct) / 100
 // =============================================================================
-int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health = 100, bool debug = false, uint8_t node_id = 0) {
+int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health, bool debug, uint8_t node_id) {
   // Rank score
   int rank_score = (rank == 0) ? 100 : max(0, 100 - (rank * 15));
 
