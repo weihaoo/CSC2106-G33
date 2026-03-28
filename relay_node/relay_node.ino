@@ -72,6 +72,7 @@ struct ParentInfo {
     int8_t   rssi;
     uint8_t  rank;
     uint8_t  queue_pct;
+    uint8_t  parent_health;
     uint32_t last_seen_ms;
     bool     valid;
 };
@@ -114,7 +115,7 @@ void     send_ack(uint8_t dst_id, uint8_t seq_num);
 void     forward_packet(uint8_t *buf, int len);
 void     broadcast_beacon();
 void     process_beacon(uint8_t *buf, int len, int rssi);
-int      score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct);
+int      score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health = 100, bool debug = false, uint8_t node_id = 0);
 void     update_parent_set();
 uint8_t  select_parent_for_packet();
 bool     is_stale(uint32_t last_seen);
@@ -421,7 +422,6 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
     sprintf(msg, "Sent ACK for packet #%d to %s", seq_num, node_name(dst_id));
     LOG_ACK(msg);
     
-    rxFlag = false;
     radio.startReceive();
 }
 
@@ -517,7 +517,6 @@ void forward_packet(uint8_t *buf, int len) {
         ack_expected_seq = seq;
         waiting_for_ack = true;
         
-        rxFlag = false;
         radio.startReceive();
         
         if (wait_for_ack(ACK_TIMEOUT_MS)) {
@@ -541,7 +540,6 @@ void forward_packet(uint8_t *buf, int len) {
     
     if (pending_forwards > 0) pending_forwards--;
     
-    rxFlag = false;
     radio.startReceive();
     
     log_separator_packet();
@@ -616,7 +614,6 @@ void broadcast_beacon() {
             my_rank, qpct, active_parent_count);
     LOG_BEACON(msg);
     
-    rxFlag = false;
     radio.startReceive();
 }
 
@@ -628,16 +625,18 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
     uint8_t rank = buf[6];
     uint8_t pay_len = buf[7];
     uint8_t queue_pct = 0;
+    uint8_t health = 0;
     
     if (len >= MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE && pay_len >= BEACON_PAYLOAD_SIZE) {
         queue_pct = buf[MESH_HEADER_SIZE + 1];
+        health    = buf[MESH_HEADER_SIZE + 3];
     }
     
     char msg[80];
     sprintf(msg, "Received beacon from %s", node_name(src_id));
     LOG_BEACON(msg);
     
-    sprintf(msg, "Signal: %d dBm | Rank: %d | Queue: %d%%", rssi, rank, queue_pct);
+    sprintf(msg, "Signal: %d dBm | Rank: %d | Queue: %d%% | Health: %d", rssi, rank, queue_pct, health);
     log_detail(msg);
     
     // Update candidate table
@@ -662,6 +661,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
     candidates[slot].rssi = (int8_t)rssi;
     candidates[slot].rank = rank;
     candidates[slot].queue_pct = queue_pct;
+    candidates[slot].parent_health = health;
     candidates[slot].last_seen_ms = millis();
     candidates[slot].valid = true;
     
@@ -672,24 +672,59 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 // =============================================================================
 // SCORE PARENT
 // =============================================================================
-int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
+int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health = 100, bool debug = false, uint8_t node_id = 0) {
     int rank_score = (rank == 0) ? 100 : max(0, 100 - (rank * 15));
-    
+
     int rssi_clamped = rssi;
     if (rssi_clamped < -120) rssi_clamped = -120;
     if (rssi_clamped > -60) rssi_clamped = -60;
     int rssi_score = (rssi_clamped + 120) * 100 / 60;
-    
+
     int queue_score = (100 - (int)queue_pct);
-    
+
     int total = (60 * rank_score / 100)
               + (25 * rssi_score / 100)
               + (15 * queue_score / 100);
-    
+
+    bool penalized = false;
     if (queue_pct >= 80) {
         total = total / 2;
+        penalized = true;
     }
-    
+
+    // Hard penalty: if candidate has no route to edge (parent_health=0),
+    // reduce score drastically so nodes prefer candidates with a live path.
+    bool no_route = false;
+    if (parent_health == 0 && rank > 0) {
+        total = total / 4;
+        no_route = true;
+    }
+
+    // Debug output showing score breakdown
+    if (debug) {
+        Serial.print("SCORE | 0x");
+        Serial.print(node_id, HEX);
+        Serial.print(" | rank=");
+        Serial.print(rank);
+        Serial.print(" (");
+        Serial.print(60 * rank_score / 100);
+        Serial.print(") | rssi=");
+        Serial.print(rssi);
+        Serial.print(" (");
+        Serial.print(25 * rssi_score / 100);
+        Serial.print(") | queue=");
+        Serial.print(queue_pct);
+        Serial.print("% (");
+        Serial.print(15 * queue_score / 100);
+        Serial.print(") | health=");
+        Serial.print(parent_health);
+        Serial.print(" | total=");
+        Serial.print(total);
+        if (penalized) Serial.print(" [QUEUE_PENALIZED]");
+        if (no_route) Serial.print(" [NO_ROUTE]");
+        Serial.println();
+    }
+
     return total;
 }
 
@@ -702,7 +737,7 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
 void update_parent_set() {
     uint8_t old_parent_count = active_parent_count;
     active_parent_count = 0;
-    
+
     // Invalidate stale candidates so their slots can be reused
     for (int i = 0; i < MAX_CANDIDATES; i++) {
         if (candidates[i].valid && is_stale(candidates[i].last_seen_ms)) {
@@ -712,15 +747,34 @@ void update_parent_set() {
             candidates[i].valid = false;
         }
     }
-    
+
+    // Count valid candidates for debug
+    int valid_count = 0;
+    for (int i = 0; i < MAX_CANDIDATES; i++) {
+        if (candidates[i].valid) valid_count++;
+    }
+
+    if (valid_count > 0) {
+        Serial.println("─────────────────────────────────────────────");
+        Serial.print("EVAL  | Scoring ");
+        Serial.print(valid_count);
+        Serial.print(" candidate(s) (threshold=");
+        Serial.print(PARENT_THRESHOLD_SCORE);
+        Serial.println("):");
+    }
+
     // Score valid candidates and build active parent set
     for (int i = 0; i < MAX_CANDIDATES; i++) {
         if (!candidates[i].valid) continue;
-        
+
+        // Pass debug=true and node_id to show score breakdown
         int score = score_parent(candidates[i].rank,
                                   candidates[i].rssi,
-                                  candidates[i].queue_pct);
-        
+                                  candidates[i].queue_pct,
+                                  candidates[i].parent_health,
+                                  true,
+                                  candidates[i].node_id);
+
         if (score >= PARENT_THRESHOLD_SCORE) {
             if (active_parent_count < MAX_ACTIVE_PARENTS) {
                 parent_set[active_parent_count].node_id = candidates[i].node_id;
@@ -731,18 +785,18 @@ void update_parent_set() {
             }
         }
     }
-    
+
     // Clear unused parent_set entries (prevent stale active flags)
     for (int i = active_parent_count; i < MAX_ACTIVE_PARENTS; i++) {
         parent_set[i].active = false;
     }
-    
+
     // Update my_rank based on best parent
     int best_score = -1;
     uint8_t best_rank = 255;
     for (int i = 0; i < MAX_CANDIDATES; i++) {
         if (!candidates[i].valid) continue;
-        int s = score_parent(candidates[i].rank, candidates[i].rssi, candidates[i].queue_pct);
+        int s = score_parent(candidates[i].rank, candidates[i].rssi, candidates[i].queue_pct, candidates[i].parent_health);
         if (s > best_score) {
             best_score = s;
             best_rank = candidates[i].rank;
@@ -753,21 +807,25 @@ void update_parent_set() {
     } else {
         my_rank = RANK_RELAY;  // Reset to default if no parents
     }
-    
+
     // Log parent set
     char msg[80];
     sprintf(msg, "Parent set updated: %d active parents (rank=%d)", active_parent_count, my_rank);
     LOG_PARENT(msg);
-    
+
     for (int i = 0; i < active_parent_count; i++) {
-        sprintf(msg, "  [%d] %s (score: %d)", 
+        sprintf(msg, "  [%d] %s (score: %d)",
                 i+1, node_name(parent_set[i].node_id), parent_set[i].score);
         log_detail(msg);
     }
-    
+
+    if (valid_count > 0) {
+        Serial.println("─────────────────────────────────────────────");
+    }
+
     // Rapid beacon on topology change — tell downstream nodes immediately
     if (active_parent_count != old_parent_count) {
-        sprintf(msg, "Topology changed: %d→%d parents, sending rapid beacon", 
+        sprintf(msg, "Topology changed: %d→%d parents, sending rapid beacon",
                 old_parent_count, active_parent_count);
         LOG_PARENT(msg);
         broadcast_beacon();

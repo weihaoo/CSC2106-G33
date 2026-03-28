@@ -525,7 +525,6 @@ void broadcast_beacon_if_due()
     }
 
     last_beacon_time = millis();
-    rxFlag = false;
     radio.startReceive(); // Return to RX mode
 }
 
@@ -622,7 +621,6 @@ void send_ack(uint8_t to_node, uint8_t seq)
         Serial.println(seq);
     }
 
-    rxFlag = false;
     radio.startReceive(); // Return to RX mode
 }
 

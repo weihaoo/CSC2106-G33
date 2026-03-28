@@ -21,7 +21,7 @@
 // =============================================================================
 
 // CHANGE THIS BEFORE FLASHING: Sensor 1 = SENSOR-03, Sensor 2 = SENSOR-04
-#define NODE_NAME "SENSOR-02"
+#define NODE_NAME "SENSOR-03"
 #include "logging.h"
 
 #include <Wire.h>
@@ -32,7 +32,7 @@
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION — Change before flashing!
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x03    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
@@ -86,6 +86,7 @@ struct ParentInfo {
   int8_t   rssi;          // last RSSI from this parent's beacon
   uint8_t  rank;          // rank reported in beacon (0=edge, 1=relay)
   uint8_t  queue_pct;     // queue occupancy reported in beacon
+  uint8_t  parent_health; // parent_health from beacon (0=no route, 100=healthy)
   uint32_t last_seen_ms;  // millis() when we last heard a beacon from this parent
   bool     valid;         // have we ever heard from this parent?
 };
@@ -141,7 +142,7 @@ void     send_ack(uint8_t dst_id, uint8_t seq_num);
 void     forward_packet(uint8_t *buf, int len);
 void     broadcast_beacon();
 void     process_beacon(uint8_t *buf, int len, int rssi);
-int      score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct);
+int      score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health = 100, bool debug = false, uint8_t node_id = 0);
 void     update_parent_selection();
 bool     has_valid_parent();
 uint8_t  get_parent_id();
@@ -445,8 +446,9 @@ bool send_with_ack(uint8_t *packet, uint8_t total_len) {
     ack_expected_seq = packet[5];  // the seq_num we sent
     waiting_for_ack = true;
 
-    rxFlag = false;
     radio.startReceive();
+    // NOTE: Do NOT clear rxFlag here — if an ACK arrived during TX,
+    // the DIO1 interrupt already set it and we need to process it.
 
     if (wait_for_ack(ACK_TIMEOUT_MS)) {
       waiting_for_ack = false;
@@ -750,8 +752,7 @@ void send_ack(uint8_t dst_id, uint8_t seq_num) {
     Serial.println(state);
   }
 
-  // Return to receive mode after ACK
-  rxFlag = false;
+  // Return to receive mode after ACK — don't clear rxFlag
   radio.startReceive();
 }
 
@@ -790,7 +791,6 @@ void forward_packet(uint8_t *buf, int len) {
   if (total_len > len) {
     Serial.println("FWD  | ERROR: payload_len exceeds received packet length");
     if (pending_forwards > 0) pending_forwards--;
-    rxFlag = false;
     radio.startReceive();
     return;
   }
@@ -820,7 +820,6 @@ void forward_packet(uint8_t *buf, int len) {
     ack_expected_seq = fwd_seq;
     waiting_for_ack = true;
 
-    rxFlag = false;
     radio.startReceive();
 
     if (wait_for_ack(ACK_TIMEOUT_MS)) {
@@ -842,7 +841,6 @@ void forward_packet(uint8_t *buf, int len) {
   if (pending_forwards > 0) pending_forwards--;
 
   // Return to receive mode
-  rxFlag = false;
   radio.startReceive();
 }
 
@@ -925,7 +923,6 @@ void broadcast_beacon() {
     Serial.println(state);
   }
 
-  rxFlag = false;
   radio.startReceive();
 }
 
@@ -952,9 +949,11 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
   if (src_id == NODE_ID) return;
 
   uint8_t queue_pct = 0;
+  uint8_t health = 0;
   if (len >= MESH_HEADER_SIZE + BEACON_PAYLOAD_SIZE && payload_len >= BEACON_PAYLOAD_SIZE) {
     // buf[MESH_HEADER_SIZE + 0] = schema_version (skip)
     queue_pct = buf[MESH_HEADER_SIZE + 1];  // queue_pct
+    health    = buf[MESH_HEADER_SIZE + 3];  // parent_health
   }
 
   Serial.print("BCN | src=0x");
@@ -965,7 +964,8 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
   Serial.print(rssi);
   Serial.print(" | queue=");
   Serial.print(queue_pct);
-  Serial.println("%");
+  Serial.print("% | health=");
+  Serial.println(health);
 
   // Find existing entry or empty slot
   int slot = -1;
@@ -993,6 +993,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
   candidates[slot].rssi         = (int8_t)rssi;
   candidates[slot].rank         = rank;
   candidates[slot].queue_pct    = queue_pct;
+  candidates[slot].parent_health = health;
   candidates[slot].last_seen_ms = millis();
   candidates[slot].valid        = true;
 
@@ -1008,7 +1009,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 // rssi_score  : maps RSSI [-120, -60] → [0, 100]
 // queue_pct   : lower is better; contribution = 15 × (100 - queue_pct) / 100
 // =============================================================================
-int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
+int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health = 100, bool debug = false, uint8_t node_id = 0) {
   // Rank score
   int rank_score = (rank == 0) ? 100 : max(0, 100 - (rank * 15));
 
@@ -1026,10 +1027,43 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct) {
             + (15 * queue_score / 100);
 
   // Hard penalty: if parent queue is near-full, halve the score.
-  // This ensures nodes switch away from congested parents regardless
-  // of rank/RSSI advantage, preventing data loss at full sinks.
+  bool penalized = false;
   if (queue_pct >= 80) {
     total = total / 2;
+    penalized = true;
+  }
+
+  // Hard penalty: if candidate has no route to edge (parent_health=0),
+  // reduce score drastically so nodes prefer candidates with a live path.
+  bool no_route = false;
+  if (parent_health == 0 && rank > 0) {
+    total = total / 4;
+    no_route = true;
+  }
+
+  // Debug output showing score breakdown
+  if (debug) {
+    Serial.print("SCORE | 0x");
+    Serial.print(node_id, HEX);
+    Serial.print(" | rank=");
+    Serial.print(rank);
+    Serial.print(" (");
+    Serial.print(60 * rank_score / 100);
+    Serial.print(") | rssi=");
+    Serial.print(rssi);
+    Serial.print(" (");
+    Serial.print(25 * rssi_score / 100);
+    Serial.print(") | queue=");
+    Serial.print(queue_pct);
+    Serial.print("% (");
+    Serial.print(15 * queue_score / 100);
+    Serial.print(") | health=");
+    Serial.print(parent_health);
+    Serial.print(" | total=");
+    Serial.print(total);
+    if (penalized) Serial.print(" [QUEUE_PENALIZED]");
+    if (no_route) Serial.print(" [NO_ROUTE]");
+    Serial.println();
   }
 
   return total;
@@ -1047,6 +1081,22 @@ void update_parent_selection() {
   int   best_score = -1;
   uint8_t best_idx = 0xFF;
 
+  // Count valid candidates for debug header
+  int valid_count = 0;
+  for (int i = 0; i < MAX_CANDIDATES; i++) {
+    if (candidates[i].valid) {
+      uint32_t age = millis() - candidates[i].last_seen_ms;
+      if (age <= PARENT_TIMEOUT_MS) valid_count++;
+    }
+  }
+
+  if (valid_count > 0) {
+    Serial.println("─────────────────────────────────────────────");
+    Serial.print("EVAL  | Comparing ");
+    Serial.print(valid_count);
+    Serial.println(" candidate(s):");
+  }
+
   for (int i = 0; i < MAX_CANDIDATES; i++) {
     if (!candidates[i].valid) continue;
 
@@ -1054,9 +1104,13 @@ void update_parent_selection() {
     uint32_t age = millis() - candidates[i].last_seen_ms;
     if (age > PARENT_TIMEOUT_MS) continue;
 
+    // Pass debug=true and node_id to show score breakdown
     int s = score_parent(candidates[i].rank,
                          candidates[i].rssi,
-                         candidates[i].queue_pct);
+                         candidates[i].queue_pct,
+                         candidates[i].parent_health,
+                         true,  // debug output enabled
+                         candidates[i].node_id);
     if (s > best_score) {
       best_score = s;
       best_idx   = i;
@@ -1076,11 +1130,15 @@ void update_parent_selection() {
     Serial.print(", my_rank=");
     Serial.print(my_rank);
     Serial.println(")");
+    Serial.println("─────────────────────────────────────────────");
   } else {
     // We have a current parent — only switch if score improvement >= hysteresis
     int current_score = score_parent(candidates[current_parent_idx].rank,
                                      candidates[current_parent_idx].rssi,
-                                     candidates[current_parent_idx].queue_pct);
+                                     candidates[current_parent_idx].queue_pct,
+                                     candidates[current_parent_idx].parent_health);
+    int score_diff = best_score - current_score;
+
     if (best_score >= current_score + PARENT_SWITCH_HYSTERESIS
         && best_idx != current_parent_idx) {
       Serial.print("PARENT | Switching from 0x");
@@ -1091,9 +1149,26 @@ void update_parent_selection() {
       Serial.print(candidates[best_idx].node_id, HEX);
       Serial.print(" (score=");
       Serial.print(best_score);
+      Serial.print(", diff=+");
+      Serial.print(score_diff);
+      Serial.print(" >= hysteresis=");
+      Serial.print(PARENT_SWITCH_HYSTERESIS);
       Serial.println(")");
       current_parent_idx = best_idx;
       my_rank = candidates[current_parent_idx].rank + 1;
+      Serial.println("─────────────────────────────────────────────");
+    } else if (best_idx != current_parent_idx && score_diff > 0) {
+      // Better candidate exists but doesn't meet hysteresis threshold
+      Serial.print("PARENT | Keeping 0x");
+      Serial.print(candidates[current_parent_idx].node_id, HEX);
+      Serial.print(" (best=0x");
+      Serial.print(candidates[best_idx].node_id, HEX);
+      Serial.print(" diff=+");
+      Serial.print(score_diff);
+      Serial.print(" < hysteresis=");
+      Serial.print(PARENT_SWITCH_HYSTERESIS);
+      Serial.println(")");
+      Serial.println("─────────────────────────────────────────────");
     }
   }
 
