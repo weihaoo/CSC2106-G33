@@ -688,7 +688,13 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
 
     bool penalized = false;
     if (queue_pct >= 80) {
-        total = total / 2;
+        // Keep edge parents discoverable during temporary edge congestion.
+        // Non-edge parents still receive a strong penalty.
+        if (rank == RANK_EDGE) {
+            total = (total * 70) / 100;
+        } else {
+            total = total / 2;
+        }
         penalized = true;
     }
 

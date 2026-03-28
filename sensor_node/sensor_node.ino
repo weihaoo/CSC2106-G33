@@ -1026,10 +1026,15 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
             + (25 * rssi_score / 100)
             + (15 * queue_score / 100);
 
-  // Hard penalty: if parent queue is near-full, halve the score.
+  // Keep edge parents discoverable during temporary edge congestion.
+  // Non-edge parents still receive a strong penalty when near-full.
   bool penalized = false;
   if (queue_pct >= 80) {
-    total = total / 2;
+    if (rank == RANK_EDGE) {
+      total = (total * 70) / 100;
+    } else {
+      total = total / 2;
+    }
     penalized = true;
   }
 
