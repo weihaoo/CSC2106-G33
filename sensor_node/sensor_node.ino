@@ -21,7 +21,7 @@
 // =============================================================================
 
 // CHANGE THIS BEFORE FLASHING: Sensor 1 = SENSOR-03, Sensor 2 = SENSOR-04
-#define NODE_NAME "SENSOR-03"
+#define NODE_NAME "SENSOR-04"
 #include "logging.h"
 
 #include <Wire.h>
@@ -32,7 +32,7 @@
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION — Change before flashing!
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x03    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
@@ -89,6 +89,7 @@ struct ParentInfo {
   uint8_t  parent_health; // parent_health from beacon (0=no route, 100=healthy)
   uint32_t last_seen_ms;  // millis() when we last heard a beacon from this parent
   bool     valid;         // have we ever heard from this parent?
+  uint8_t  fail_count;    // consecutive send_with_ack failure rounds (strikes)
 };
 
 // Candidate table — we track up to MAX_CANDIDATES potential parents
@@ -268,6 +269,10 @@ void loop() {
     bool success = send_with_ack(packet, MESH_HEADER_SIZE + SENSOR_PAYLOAD_SIZE);
 
     if (success) {
+      // Reset strike counter on successful delivery
+      if (current_parent_idx < MAX_CANDIDATES) {
+        candidates[current_parent_idx].fail_count = 0;
+      }
       Serial.print("TX | node=");
       Serial.print(NODE_ID, HEX);
       Serial.print(" | seq=");
@@ -284,16 +289,30 @@ void loop() {
       }
       Serial.println();
     } else {
-      Serial.println("TX | All retries failed. Invalidating parent and re-evaluating.");
-      // Invalidate the failed parent so it isn't immediately reselected
+      // Strikes system: don't invalidate after a single failure round.
+      // Marginal links can recover from transient fading events.
       if (current_parent_idx < MAX_CANDIDATES) {
-        candidates[current_parent_idx].valid = false;
+        candidates[current_parent_idx].fail_count++;
+        Serial.print("TX | Strike ");
+        Serial.print(candidates[current_parent_idx].fail_count);
+        Serial.print("/");
+        Serial.println(MAX_PARENT_STRIKES);
+
+        if (candidates[current_parent_idx].fail_count >= MAX_PARENT_STRIKES) {
+          Serial.println("TX | Max strikes reached. Invalidating parent.");
+          candidates[current_parent_idx].valid = false;
+          current_parent_idx = 0xFF;
+          my_rank = RANK_SENSOR;
+          update_parent_selection();
+          broadcast_beacon();
+        }
+      } else {
+        // No current parent index — just re-evaluate
+        current_parent_idx = 0xFF;
+        my_rank = RANK_SENSOR;
+        update_parent_selection();
+        broadcast_beacon();
       }
-      current_parent_idx = 0xFF;
-      my_rank = RANK_SENSOR;  // Reset rank
-      update_parent_selection();
-      // Rapid beacon so downstream nodes know our topology changed
-      broadcast_beacon();
     }
   }
 }
@@ -973,6 +992,18 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
     health    = buf[MESH_HEADER_SIZE + 3];  // parent_health
   }
 
+  // RSSI floor: reject beacons from nodes with unusable signal strength.
+  // Prevents wasting candidate slots on links that can't reliably exchange ACKs.
+  if (rssi < MIN_PARENT_RSSI) {
+    Serial.print("BCN | REJECTED src=0x");
+    Serial.print(src_id, HEX);
+    Serial.print(" | rssi=");
+    Serial.print(rssi);
+    Serial.print(" < floor=");
+    Serial.println(MIN_PARENT_RSSI);
+    return;
+  }
+
   Serial.print("BCN | src=0x");
   Serial.print(src_id, HEX);
   Serial.print(" | rank=");
@@ -1013,6 +1044,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
   candidates[slot].parent_health = health;
   candidates[slot].last_seen_ms = millis();
   candidates[slot].valid        = true;
+  candidates[slot].fail_count   = 0;  // fresh beacon resets strikes
 
   // Re-evaluate parent after every beacon update
   update_parent_selection();
@@ -1020,11 +1052,12 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
 
 // =============================================================================
 // PARENT SCORING
-// score = (60 × rank_score) + (25 × rssi_score) + (15 × (100 − queue_pct))
+// score = RANK% × rank_score + RSSI% × rssi_score + QUEUE% × queue_score
+// Weights defined in mesh_protocol.h (SCORE_WEIGHT_RANK/RSSI/QUEUE)
 //
 // rank_score  : rank=0 (edge) → 100, rank=1 (relay) → 85, rank=2 → 70, ...
 // rssi_score  : maps RSSI [-120, -60] → [0, 100]
-// queue_pct   : lower is better; contribution = 15 × (100 - queue_pct) / 100
+// queue_pct   : lower is better; contribution = QUEUE% × (100 - queue_pct) / 100
 // =============================================================================
 int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_health, bool debug, uint8_t node_id) {
   // Rank score
@@ -1039,9 +1072,9 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
   // Queue score
   int queue_score = (100 - (int)queue_pct);  // 0–100, higher is better
 
-  int total = (60 * rank_score / 100)
-            + (25 * rssi_score / 100)
-            + (15 * queue_score / 100);
+  int total = (SCORE_WEIGHT_RANK * rank_score / 100)
+            + (SCORE_WEIGHT_RSSI * rssi_score / 100)
+            + (SCORE_WEIGHT_QUEUE * queue_score / 100);
 
   // Keep edge parents discoverable during temporary edge congestion.
   // Non-edge parents still receive a strong penalty when near-full.
@@ -1070,15 +1103,15 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
     Serial.print(" | rank=");
     Serial.print(rank);
     Serial.print(" (");
-    Serial.print(60 * rank_score / 100);
+    Serial.print(SCORE_WEIGHT_RANK * rank_score / 100);
     Serial.print(") | rssi=");
     Serial.print(rssi);
     Serial.print(" (");
-    Serial.print(25 * rssi_score / 100);
+    Serial.print(SCORE_WEIGHT_RSSI * rssi_score / 100);
     Serial.print(") | queue=");
     Serial.print(queue_pct);
     Serial.print("% (");
-    Serial.print(15 * queue_score / 100);
+    Serial.print(SCORE_WEIGHT_QUEUE * queue_score / 100);
     Serial.print(") | health=");
     Serial.print(parent_health);
     Serial.print(" | total=");

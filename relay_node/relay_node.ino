@@ -75,6 +75,7 @@ struct ParentInfo {
     uint8_t  parent_health;
     uint32_t last_seen_ms;
     bool     valid;
+    uint8_t  fail_count;    // consecutive forward failure rounds (strikes)
 };
 
 ParentInfo candidates[MAX_CANDIDATES];
@@ -638,13 +639,21 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
         health    = buf[MESH_HEADER_SIZE + 3];
     }
     
+    // RSSI floor: reject beacons from nodes with unusable signal strength
+    if (rssi < MIN_PARENT_RSSI) {
+        char rmsg[64];
+        sprintf(rmsg, "REJECTED beacon from %s | rssi=%d < floor=%d", node_name(src_id), rssi, MIN_PARENT_RSSI);
+        LOG_BEACON(rmsg);
+        return;
+    }
+
     char msg[80];
     sprintf(msg, "Received beacon from %s", node_name(src_id));
     LOG_BEACON(msg);
-    
+
     sprintf(msg, "Signal: %d dBm | Rank: %d | Queue: %d%% | Health: %d", rssi, rank, queue_pct, health);
     log_detail(msg);
-    
+
     // Update candidate table
     int slot = -1;
     for (int i = 0; i < MAX_CANDIDATES; i++) {
@@ -670,6 +679,7 @@ void process_beacon(uint8_t *buf, int len, int rssi) {
     candidates[slot].parent_health = health;
     candidates[slot].last_seen_ms = millis();
     candidates[slot].valid = true;
+    candidates[slot].fail_count = 0;  // fresh beacon resets strikes
     
     // Update DAG parent set
     update_parent_set();
@@ -688,9 +698,9 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
 
     int queue_score = (100 - (int)queue_pct);
 
-    int total = (60 * rank_score / 100)
-              + (25 * rssi_score / 100)
-              + (15 * queue_score / 100);
+    int total = (SCORE_WEIGHT_RANK * rank_score / 100)
+              + (SCORE_WEIGHT_RSSI * rssi_score / 100)
+              + (SCORE_WEIGHT_QUEUE * queue_score / 100);
 
     bool penalized = false;
     if (queue_pct >= 80) {
@@ -719,15 +729,15 @@ int score_parent(uint8_t rank, int8_t rssi, uint8_t queue_pct, uint8_t parent_he
         Serial.print(" | rank=");
         Serial.print(rank);
         Serial.print(" (");
-        Serial.print(60 * rank_score / 100);
+        Serial.print(SCORE_WEIGHT_RANK * rank_score / 100);
         Serial.print(") | rssi=");
         Serial.print(rssi);
         Serial.print(" (");
-        Serial.print(25 * rssi_score / 100);
+        Serial.print(SCORE_WEIGHT_RSSI * rssi_score / 100);
         Serial.print(") | queue=");
         Serial.print(queue_pct);
         Serial.print("% (");
-        Serial.print(15 * queue_score / 100);
+        Serial.print(SCORE_WEIGHT_QUEUE * queue_score / 100);
         Serial.print(") | health=");
         Serial.print(parent_health);
         Serial.print(" | total=");
