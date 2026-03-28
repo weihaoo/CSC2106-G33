@@ -22,7 +22,7 @@
 #define LORA_BANDWIDTH      125.0   // kHz
 #define LORA_CODING_RATE    5       // 4/5
 #define LORA_SYNC_WORD      0x33    // Group 33 unique sync word (default 0x12 conflicts with neighbors)
-#define LORA_TX_POWER       2      // dBm
+#define LORA_TX_POWER       11      // dBm
 
 // ════════════════════════════════════════════════════════════════════════════
 // PROTOCOL TIMING CONSTANTS (shared across all nodes)
