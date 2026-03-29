@@ -1,10 +1,9 @@
 // ════════════════════════════════════════════════════════════════════════════
-// MESH PROTOCOL DEFINITIONS — CANONICAL (all nodes share this file)
+// MESH PROTOCOL DEFINITIONS — SHARED
 // CSC2106 Group 33 — LoRa Mesh Network
 //
-// Copy this file verbatim into sensor_node/, relay_node/, and edge_node/.
-// Do NOT add node-specific constants here — those belong in each .ino or
-// the edge node's config.h.
+// This file lives in shared/ and is included by all nodes via:
+//   #include "../shared/mesh_protocol.h"
 // ════════════════════════════════════════════════════════════════════════════
 
 #ifndef MESH_PROTOCOL_H
@@ -22,7 +21,7 @@
 #define LORA_BANDWIDTH      125.0   // kHz
 #define LORA_CODING_RATE    5       // 4/5
 #define LORA_SYNC_WORD      0x33    // Group 33 unique sync word (default 0x12 conflicts with neighbors)
-#define LORA_TX_POWER       14      // dBm
+#define LORA_TX_POWER       -9      // dBm (set to 14 for outdoor/final deployment)
 
 // ════════════════════════════════════════════════════════════════════════════
 // PROTOCOL TIMING CONSTANTS (shared across all nodes)
@@ -54,7 +53,7 @@
 #define DAG_ENABLED              true      // Enable multi-parent DAG architecture
 #define PARENT_THRESHOLD_SCORE   50        // Minimum score to be an active parent
 #define MAX_ACTIVE_PARENTS       MAX_CANDIDATES  // Max simultaneous active parents
-#define MIN_PARENT_RSSI          -110      // Hard reject candidates weaker than this (dBm)
+#define MIN_PARENT_RSSI          -75       // Hard reject candidates weaker than this (dBm) (set to -110 for outdoor/final deployment)
 #define MAX_PARENT_STRIKES       2         // Consecutive TX failure rounds before invalidating parent
 
 // Parent scoring weights (must sum to 100)

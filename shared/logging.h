@@ -7,7 +7,7 @@
 //   1. Define NODE_NAME before including this file:
 //      #define NODE_NAME "RELAY-02"
 //   2. Include this file:
-//      #include "logging.h"
+//      #include "../shared/logging.h"
 //   3. Use logging macros:
 //      LOG_INFO("Initializing...");
 //      LOG_OK("Radio ready");
