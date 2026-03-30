@@ -46,7 +46,7 @@
 
 // Edge node aggregation
 #define MAX_AGG_RECORDS          7         // Max sensor readings per LoRaWAN uplink
-#define AGG_FLUSH_TIMEOUT_MS     240000UL  // Flush to TTN after 4 minutes regardless
+#define AGG_FLUSH_TIMEOUT_MS     30000UL   // Flush aggregation buffer after 30 seconds
 
 // ════════════════════════════════════════════════════════════════════════════
 // DAG (DIRECTED ACYCLIC GRAPH) CONFIGURATION
