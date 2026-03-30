@@ -235,9 +235,12 @@ inline void receive_and_process() {
         // Accept beacons from:
         //   1. Lower rank (always -- closer to edge), OR
         //   2. Same rank with a valid parent, when we have no parent
-        //      (allows sensor-to-sensor relay without creating loops)
+        //      (allows sensor-to-sensor relay without creating loops), OR
+        //   3. Current parent (always -- so we learn rank/health changes)
+        bool is_current_parent = has_valid_parent() && (src_id == get_parent_id());
         bool accept = (rank < my_rank) ||
-                      (rank == my_rank && beacon_health > 0 && !has_valid_parent());
+                      (rank == my_rank && beacon_health > 0 && !has_valid_parent()) ||
+                      is_current_parent;
 
         if (accept) {
             // Validate CRC before processing
