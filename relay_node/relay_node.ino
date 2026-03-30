@@ -71,12 +71,6 @@ uint8_t    dedup_head = 0;
 // Forwarding queue counter
 volatile uint8_t pending_forwards = 0;
 
-// Parent whitelist: relay accepts beacons from both edge nodes only.
-// Sensors are rank 2 and shouldn't be relay parents anyway, but the whitelist
-// makes the intended topology explicit.
-const uint8_t allowed_parents[] = {0x01, 0x06};
-const uint8_t allowed_parents_count = 2;
-
 // ACK tracking — for forward_packet() to detect ACKs from parent
 volatile bool ack_received = false;
 uint8_t       ack_expected_seq = 0;

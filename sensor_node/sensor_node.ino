@@ -66,12 +66,6 @@ uint8_t    dedup_head = 0;
 // Forwarding queue counter
 volatile uint8_t pending_forwards = 0;
 
-// Parent whitelist: only accept beacons from primary edge (0x01) and relay (0x02).
-// This prevents the sensor from shortcutting directly to the secondary edge (0x06),
-// which would bypass the relay and break multi-hop routing in failover tests.
-const uint8_t allowed_parents[] = {0x01, 0x02};
-const uint8_t allowed_parents_count = 2;
-
 // Sequence number
 uint8_t seq_num = 0;
 
