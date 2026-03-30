@@ -37,7 +37,7 @@ XPowersAXP2101 PMU;
 SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 
 // Uncomment the next line to enable LoRaWAN join + uplink (requires real TTN credentials in config.h)
-#define ENABLE_LORAWAN
+// #define ENABLE_LORAWAN  // Disabled for mesh-only testing (re-enable for TTN uplink)
 
 #ifdef ENABLE_LORAWAN
 LoRaWANNode lorawan_node(&radio, &AS923); // AS923 for Singapore

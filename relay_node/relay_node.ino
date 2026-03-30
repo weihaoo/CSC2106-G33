@@ -42,6 +42,11 @@
 // Beacon phase offset — spreads beacons across the 10s window to avoid collisions
 #define BEACON_PHASE_OFFSET_MS  ((NODE_ID % 5) * 2000UL)
 
+// -----------------------------------------------------------------------------
+// RELAY ROUTING HEADER (must come before globals — defines ParentSetEntry struct)
+// -----------------------------------------------------------------------------
+#include "relay_routing.h"
+
 // ============================================================================
 // GLOBAL VARIABLE DEFINITIONS
 // These satisfy the extern declarations in mesh_radio.h and mesh_common.h.
@@ -74,7 +79,6 @@ bool          waiting_for_ack = false;
 // ============================================================================
 // LOCAL HEADERS (must come after global definitions they reference)
 // ============================================================================
-#include "relay_routing.h"
 #include "relay_packets.h"
 
 // =============================================================================
