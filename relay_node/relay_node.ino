@@ -71,6 +71,12 @@ uint8_t    dedup_head = 0;
 // Forwarding queue counter
 volatile uint8_t pending_forwards = 0;
 
+// Parent whitelist: relay accepts beacons from both edge nodes only.
+// Sensors are rank 2 and shouldn't be relay parents anyway, but the whitelist
+// makes the intended topology explicit.
+const uint8_t allowed_parents[] = {0x01, 0x06};
+const uint8_t allowed_parents_count = 2;
+
 // ACK tracking — for forward_packet() to detect ACKs from parent
 volatile bool ack_received = false;
 uint8_t       ack_expected_seq = 0;
@@ -168,6 +174,10 @@ void setup() {
 
     log_boot_banner("Relay Node");
 
+    char buf[64];
+    sprintf(buf, "Firmware %s | Node 0x%02X", FIRMWARE_VERSION, NODE_ID);
+    LOG_INFO(buf);
+
     // Initialise tables
     for (int i = 0; i < DEDUP_TABLE_SIZE; i++) {
         dedup_table[i].valid = false;
@@ -186,7 +196,6 @@ void setup() {
     LOG_INFO("Initializing LoRa radio...");
     init_radio();
 
-    char buf[64];
     sprintf(buf, "Radio ready: %.1f MHz, SF%d, BW%.0f kHz",
             LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
     LOG_OK(buf);

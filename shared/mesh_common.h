@@ -62,6 +62,12 @@ extern uint8_t       ack_expected_seq;
 extern bool          waiting_for_ack;
 extern volatile uint8_t pending_forwards;
 
+// Parent whitelist — if non-empty, only accept beacons from these node IDs.
+// Each .ino defines its own list (e.g., sensors only accept relay + primary edge).
+// Edge nodes set count=0 to accept all (they don't select parents anyway).
+extern const uint8_t  allowed_parents[];
+extern const uint8_t  allowed_parents_count;
+
 // ============================================================================
 // EXTERN FUNCTION DECLARATIONS
 // Each .ino provides its own implementation of these.
@@ -242,6 +248,22 @@ inline void process_beacon(uint8_t *buf, int len, int rssi) {
 
     // Ignore our own beacons (safety check)
     if (src_id == NODE_ID) return;
+
+    // Whitelist filter: if allowed_parents is non-empty, only accept listed nodes.
+    // This enforces the intended topology (e.g., sensors must go through relay,
+    // not shortcut directly to the secondary edge).
+    if (allowed_parents_count > 0) {
+        bool allowed = false;
+        for (uint8_t i = 0; i < allowed_parents_count; i++) {
+            if (src_id == allowed_parents[i]) { allowed = true; break; }
+        }
+        if (!allowed) {
+            Serial.print("BCN | WHITELIST_REJECT src=0x");
+            Serial.print(src_id, HEX);
+            Serial.println(" | not in allowed_parents");
+            return;
+        }
+    }
 
     // Parse beacon payload fields
     uint8_t queue_pct = 0;

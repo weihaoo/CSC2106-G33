@@ -66,6 +66,12 @@ uint8_t    dedup_head = 0;
 // Forwarding queue counter
 volatile uint8_t pending_forwards = 0;
 
+// Parent whitelist: only accept beacons from primary edge (0x01) and relay (0x02).
+// This prevents the sensor from shortcutting directly to the secondary edge (0x06),
+// which would bypass the relay and break multi-hop routing in failover tests.
+const uint8_t allowed_parents[] = {0x01, 0x02};
+const uint8_t allowed_parents_count = 2;
+
 // Sequence number
 uint8_t seq_num = 0;
 
@@ -221,6 +227,10 @@ void setup() {
 
     log_boot_banner("Sensor Node");
 
+    char buf[64];
+    sprintf(buf, "Firmware %s | Node 0x%02X", FIRMWARE_VERSION, NODE_ID);
+    LOG_INFO(buf);
+
     // Initialise candidates table
     for (int i = 0; i < MAX_CANDIDATES; i++) {
         candidates[i].valid = false;
@@ -238,7 +248,6 @@ void setup() {
     LOG_INFO("Initializing LoRa radio...");
     init_radio();
 
-    char buf[64];
     sprintf(buf, "Radio ready: %.1f MHz, SF%d, BW%.0f kHz",
             LORA_FREQUENCY, LORA_SPREADING, LORA_BANDWIDTH);
     LOG_OK(buf);

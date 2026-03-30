@@ -126,7 +126,7 @@ void setup()
     log_boot_banner("Edge Node");
 
     char buf[64];
-    sprintf(buf, "Node ID: 0x%02X | Rank: %d", NODE_ID, MY_RANK);
+    sprintf(buf, "Firmware %s | Node 0x%02X | Rank: %d", FIRMWARE_VERSION, NODE_ID, MY_RANK);
     LOG_INFO(buf);
 
     // ──────────────────────────────────────────────────────────────────────
