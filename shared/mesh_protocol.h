@@ -21,7 +21,7 @@
 #define LORA_BANDWIDTH      125.0   // kHz
 #define LORA_CODING_RATE    5       // 4/5
 #define LORA_SYNC_WORD      0x33    // Group 33 unique sync word (default 0x12 conflicts with neighbors)
-#define LORA_TX_POWER       -9      // dBm (set to 14 for outdoor/final deployment)
+#define LORA_TX_POWER       14      // dBm (was -9 for desk testing, 14 for multi-building deployment)
 
 // ════════════════════════════════════════════════════════════════════════════
 // PROTOCOL TIMING CONSTANTS (shared across all nodes)
@@ -53,7 +53,7 @@
 #define DAG_ENABLED              true      // Enable multi-parent DAG architecture
 #define PARENT_THRESHOLD_SCORE   50        // Minimum score to be an active parent
 #define MAX_ACTIVE_PARENTS       MAX_CANDIDATES  // Max simultaneous active parents
-#define MIN_PARENT_RSSI          -75       // Hard reject candidates weaker than this (dBm) (set to -110 for outdoor/final deployment)
+#define MIN_PARENT_RSSI          -100      // Hard reject candidates weaker than this (dBm) (was -75 for desk testing)
 #define MAX_PARENT_STRIKES       2         // Consecutive TX failure rounds before invalidating parent
 
 // Parent scoring weights (must sum to 100)
