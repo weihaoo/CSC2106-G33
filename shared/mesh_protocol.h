@@ -13,7 +13,7 @@
 #include <RadioLib.h>
 
 // Firmware version — printed at boot so teammates can verify all boards match
-#define FIRMWARE_VERSION "v1.4"
+#define FIRMWARE_VERSION "v1.5"
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORA RADIO PARAMETERS (AS923, Singapore — all nodes must match exactly)
@@ -124,30 +124,36 @@ typedef struct __attribute__((packed)) {
 #define MESH_HEADER_SIZE 10
 
 // ════════════════════════════════════════════════════════════════════════════
-// SENSOR PAYLOAD — 7 BYTES (DHT22 temperature + humidity reading)
+// SENSOR PAYLOAD — 11 BYTES (DHT22 temperature + humidity + NTP timestamp)
 //
-// Byte layout:
-//   [0] schema_version — 0x01
-//   [1] sensor_type    — 0x03 = DHT22
-//   [2–3] temp_c_x10   — temperature × 10, signed int16, big-endian
-//                         (e.g. 253 = 25.3°C, -12 = -1.2°C)
-//   [4–5] humidity_x10 — humidity × 10, unsigned int16, big-endian
-//                         (e.g. 655 = 65.5%)
-//   [6] status         — 0x00 = OK, 0x01 = read error (discard this reading)
+// Byte layout (all multi-byte fields are big-endian):
+//   [0]    schema_version      — 0x01
+//   [1]    sensor_type         — 0x03 = DHT22
+//   [2–3]  temp_c_x10          — temperature × 10, signed int16
+//                                (e.g. 253 = 25.3°C, -12 = -1.2°C)
+//   [4–5]  humidity_x10        — humidity × 10, unsigned int16
+//                                (e.g. 655 = 65.5%)
+//   [6]    status              — 0x00 = OK, 0x01 = read error
+//   [7–10] send_timestamp_s    — NTP Unix timestamp (seconds) at TX time,
+//                                big-endian uint32. 0x00000000 = no NTP sync.
+//                                Edge node subtracts this from its own NTP
+//                                receive time to compute one-way latency.
 //
 // NOTE: Use manual byte packing (not struct cast) to guarantee big-endian
 // layout on any platform.
 // ════════════════════════════════════════════════════════════════════════════
 
 typedef struct __attribute__((packed)) {
-    uint8_t  schema_version;  // 0x01
-    uint8_t  sensor_type;     // 0x03 = DHT22
-    int16_t  temp_c_x10;      // Temperature × 10 (signed)
-    uint16_t humidity_x10;    // Humidity × 10 (unsigned)
-    uint8_t  status;          // 0x00 = OK, 0x01 = read error
+    uint8_t  schema_version;    // 0x01
+    uint8_t  sensor_type;       // 0x03 = DHT22
+    int16_t  temp_c_x10;        // Temperature × 10 (signed)
+    uint16_t humidity_x10;      // Humidity × 10 (unsigned)
+    uint8_t  status;            // 0x00 = OK, 0x01 = read error
+    uint32_t send_timestamp_s;  // NTP Unix epoch (seconds) at TX, big-endian
+                                // 0 = NTP not available on this node
 } SensorPayload;
 
-#define SENSOR_PAYLOAD_SIZE 7
+#define SENSOR_PAYLOAD_SIZE 11   // 7 original + 4 bytes NTP timestamp
 #define SENSOR_TYPE_DHT22   0x03
 
 // ════════════════════════════════════════════════════════════════════════════

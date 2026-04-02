@@ -81,6 +81,18 @@
 #define MY_RANK             0           // Edge nodes are always rank 0 (RANK_EDGE in mesh_protocol.h)
 
 // ════════════════════════════════════════════════════════════════════════════
+// WI-FI + NTP CREDENTIALS (for latency measurement demo)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Set to true to enable Wi-Fi + NTP sync and one-way latency display.
+// If false (or no Wi-Fi available), latency display is silently skipped.
+#define NTP_ENABLED         true
+
+// CHANGE THESE to your demo Wi-Fi network credentials
+#define WIFI_SSID           "YourSSID"      // <-- Replace with your Wi-Fi name
+#define WIFI_PASSWORD       "YourPassword"  // <-- Replace with your Wi-Fi password
+
+// ════════════════════════════════════════════════════════════════════════════
 // LORAWAN UPLINK PARAMETERS (edge-node specific)
 // MAX_AGG_RECORDS and AGG_FLUSH_TIMEOUT_MS are in mesh_protocol.h
 // ════════════════════════════════════════════════════════════════════════════

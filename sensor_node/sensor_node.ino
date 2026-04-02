@@ -26,6 +26,17 @@
 // -----------------------------------------------------------------------------
 #include "../shared/mesh_radio.h"
 #include "../shared/mesh_common.h"
+#include "../shared/ntp_time.h"   // Wi-Fi + NTP sync for latency timestamping
+
+// -----------------------------------------------------------------------------
+// WI-FI + NTP CONFIG (for demo latency measurement)
+// Sensor connects to Wi-Fi at boot, syncs NTP, then disconnects.
+// The NTP time is embedded in each outgoing packet for latency calculation.
+// Set NTP_ENABLED to false to skip Wi-Fi entirely.
+// -----------------------------------------------------------------------------
+#define NTP_ENABLED     true
+#define WIFI_SSID       "YourSSID"      // <-- Replace with your Wi-Fi name
+#define WIFI_PASSWORD   "YourPassword"  // <-- Replace with your Wi-Fi password
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
@@ -105,7 +116,7 @@ bool read_sensor(float &temp, float &hum) {
 }
 
 // ============================================================================
-// BUILD SENSOR PAYLOAD (SENSOR_PAYLOAD_SIZE = 7 bytes)
+// BUILD SENSOR PAYLOAD (SENSOR_PAYLOAD_SIZE = 11 bytes, includes NTP timestamp)
 //
 // Byte layout (big-endian integers):
 //   [0] schema_version = 0x01
@@ -125,6 +136,14 @@ void build_sensor_payload(uint8_t *payload, float temp, float hum, bool sensor_o
     payload[4] = (hum_x10 >> 8) & 0xFF;      // humidity high byte
     payload[5] = hum_x10 & 0xFF;             // humidity low byte
     payload[6] = sensor_ok ? 0x00 : 0x01;    // status
+
+    // Bytes [7-10]: NTP send timestamp (big-endian uint32, seconds)
+    // Zero if NTP is disabled or not yet synced (edge node handles gracefully)
+    uint32_t ts = ntp_is_synced() ? get_ntp_epoch_s() : 0;
+    payload[7]  = (ts >> 24) & 0xFF;
+    payload[8]  = (ts >> 16) & 0xFF;
+    payload[9]  = (ts >>  8) & 0xFF;
+    payload[10] =  ts        & 0xFF;
 }
 
 // ============================================================================
@@ -234,6 +253,22 @@ void setup() {
     for (int i = 0; i < DEDUP_TABLE_SIZE; i++) {
         dedup_table[i].valid = false;
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Wi-Fi + NTP sync (before radio init to avoid SPI conflicts)
+    // ──────────────────────────────────────────────────────────────────
+#if NTP_ENABLED
+    LOG_INFO("Starting Wi-Fi + NTP sync for TX timestamp...");
+    bool ntp_ok = init_wifi_ntp(WIFI_SSID, WIFI_PASSWORD);
+    if (ntp_ok) {
+        LOG_OK("NTP synced — packets will carry send timestamp");
+    } else {
+        LOG_WARN("NTP failed — packets will send timestamp=0 (no latency calc)");
+    }
+    // Disconnect Wi-Fi — LoRa uses SPI, Wi-Fi sits idle; free RAM and avoid conflicts
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+#endif
 
     LOG_INFO("Initializing PMU (AXP2101)...");
     init_pmu();

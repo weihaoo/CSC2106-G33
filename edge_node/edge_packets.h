@@ -36,6 +36,7 @@ extern uint32_t packets_received;
 extern uint32_t packets_dropped;
 
 extern bool lorawan_joined;
+extern bool edge_ntp_synced;   // true if edge NTP sync succeeded at boot
 
 // ════════════════════════════════════════════════════════════════════════════
 // FORWARD DECLARATIONS
@@ -277,6 +278,9 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
 {
     uint8_t hop_count = DEFAULT_TTL - hdr->ttl; // Estimate hops from remaining TTL
 
+    // Capture edge receive timestamp as early as possible for best accuracy
+    uint32_t recv_time_s = get_ntp_epoch_s();
+
     Serial.println(F("────────────────────────────────────────────────────"));
     Serial.print(F("RX_MESH | src=0x"));
     Serial.print(hdr->src_id, HEX);
@@ -286,6 +290,50 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
     Serial.print(hop_count);
     Serial.print(F(" | rssi="));
     Serial.println(rssi);
+
+    // ──────────────────────────────────────────────────────────────────
+    // ONE-WAY LATENCY CALCULATION
+    // Reads send_timestamp_s from bytes [7-10] of the sensor payload.
+    // Only shown when both edge and sensor had valid NTP sync at TX/RX time.
+    // ──────────────────────────────────────────────────────────────────
+
+    if (edge_ntp_synced && hdr->payload_len >= 11) {
+        // Decode send_timestamp_s (big-endian uint32 at payload bytes 7-10)
+        uint32_t send_ts = ((uint32_t)payload[7] << 24)
+                         | ((uint32_t)payload[8] << 16)
+                         | ((uint32_t)payload[9] <<  8)
+                         |  (uint32_t)payload[10];
+
+        if (send_ts != 0) {
+            // One-way latency in seconds (NTP resolution is 1s; use ms anchor for sub-second)
+            // For sub-second display we use the ms-level edge receive time vs coarse send time
+            uint32_t edge_recv_ms_within_sec = (millis() - _sync_millis) % 1000;
+
+            // Coarse one-way latency in ms:
+            //   (recv whole-seconds - send whole-seconds) * 1000 + recv fractional ms
+            int32_t latency_ms = (int32_t)(recv_time_s - send_ts) * 1000
+                               + (int32_t)edge_recv_ms_within_sec;
+
+            Serial.print(F("LATENCY | src=0x"));
+            Serial.print(hdr->src_id, HEX);
+            Serial.print(F(" | send_ts="));
+            Serial.print(send_ts);
+            Serial.print(F(" | recv_ts="));
+            Serial.print(recv_time_s);
+            Serial.print(F(" | one-way ~"));
+            if (latency_ms >= 0 && latency_ms < 60000) {
+                Serial.print(latency_ms);
+                Serial.println(F(" ms"));
+            } else {
+                // Negative or unreasonably large = clock skew, show raw delta
+                Serial.print((int32_t)(recv_time_s - send_ts));
+                Serial.println(F(" s (coarse, NTP skew possible)"));
+            }
+        } else {
+            Serial.println(F("LATENCY | sensor NTP not synced — no timestamp in packet"));
+        }
+    }
+    // (If edge_ntp_synced is false, silently skip latency display)
 
     // ──────────────────────────────────────────────────────────────────────
     // SEND ACK (if requested)

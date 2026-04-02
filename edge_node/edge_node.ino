@@ -28,6 +28,7 @@
 #include <RadioLib.h>
 #include "config.h"
 #include "../shared/mesh_protocol.h"
+#include "../shared/ntp_time.h"   // Wi-Fi + NTP sync for latency measurement
 
 // ════════════════════════════════════════════════════════════════════════════
 // HARDWARE OBJECTS
@@ -73,7 +74,8 @@ bool lorawan_enabled = false;
 // AGGREGATION BUFFER (stores up to 7 sensor readings)
 // ════════════════════════════════════════════════════════════════════════════
 
-#define MAX_OPAQUE_PAYLOAD 32  // Max payload bytes we'll store (any sensor type)
+#define MAX_OPAQUE_PAYLOAD 36  // Max payload bytes we'll store (any sensor type)
+                               // 36 >= 11 (DHT22 with NTP timestamp)
 
 struct AggRecord
 {
@@ -107,6 +109,9 @@ uint32_t packets_received = 0;
 uint32_t packets_dropped = 0;
 uint32_t uplinks_sent = 0;
 
+// Whether edge NTP sync succeeded (used by edge_packets.h for latency display)
+bool edge_ntp_synced = false;
+
 // ════════════════════════════════════════════════════════════════════════════
 // LOCAL HEADERS (included AFTER all globals so externs resolve)
 // ════════════════════════════════════════════════════════════════════════════
@@ -136,6 +141,23 @@ void setup()
 
     LOG_INFO("Initializing PMU (AXP2101)...");
     Wire.begin(PMU_SDA, PMU_SCL);
+
+    // ──────────────────────────────────────────────────────────────────────
+    // PHASE 1: Wi-Fi + NTP sync (before PMU/radio, no hardware conflicts)
+    // ──────────────────────────────────────────────────────────────────────
+
+#if NTP_ENABLED
+    LOG_INFO("Starting Wi-Fi + NTP sync for latency measurement...");
+    edge_ntp_synced = init_wifi_ntp(WIFI_SSID, WIFI_PASSWORD);
+    if (edge_ntp_synced) {
+        LOG_OK("NTP sync successful — latency measurement enabled");
+    } else {
+        LOG_WARN("NTP sync failed — latency display will be skipped");
+    }
+    // Disconnect Wi-Fi after sync to free resources (NTP anchor stored in ntp_time.h)
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+#endif
 
     if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, PMU_SDA, PMU_SCL))
     {
