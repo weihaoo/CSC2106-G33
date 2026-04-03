@@ -353,6 +353,10 @@ class MetricsPlotter:
         time_axis = []
         
         for i, t in enumerate(elapsed_times):
+            # Skip until window has warmed up (at least 10s of data)
+            if t < 10.0:
+                continue
+            
             # Count packets in the window [t - window_s, t]
             window_start = max(0, t - window_s)
             packets_in_window = sum(1 for et in elapsed_times[:i+1] if et >= window_start)
@@ -361,12 +365,13 @@ class MetricsPlotter:
             times_in_window = [et for et in elapsed_times[:i+1] if et >= window_start]
             if len(times_in_window) >= 2:
                 actual_window = times_in_window[-1] - times_in_window[0]
-                if actual_window > 0:
+                # Require minimum 5s window to avoid spikes
+                if actual_window >= 5.0:
                     bps = (packets_in_window * bytes_per_packet) / actual_window
                 else:
-                    bps = 0
+                    continue
             else:
-                bps = 0
+                continue
             
             throughput.append(bps)
             time_axis.append(t)
