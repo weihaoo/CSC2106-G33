@@ -1,0 +1,13 @@
+Metric,Value
+Total Packets,161
+Total Drops,12
+Unique Nodes,2
+Overall PDR (%),78.9
+Latency Min (ms),162
+Latency Max (ms),48865
+Latency Mean (ms),4680.5
+Latency Median (ms),2394.0
+Latency Std Dev,7295.4
+Hops Min,0
+Hops Max,1
+Hops Mean,0.4
