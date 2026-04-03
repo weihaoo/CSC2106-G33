@@ -30,6 +30,8 @@ secrets.h
 
 # Serial logs
 *.log
+!logs/
+!logs/*.log
 
 # Docs
 ./docs
