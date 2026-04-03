@@ -191,13 +191,13 @@ def on_message(client, userdata, msg):
 # ── Flask App ──
 app = Flask(__name__)
 
+
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="5">
     <title>G33 Mesh Metrics Dashboard</title>
     <style>
         * { box-sizing: border-box; }
@@ -215,11 +215,23 @@ DASHBOARD_HTML = """
         h1 { font-size: 1.5rem; font-weight: 700; color: #60a5fa; margin: 0; }
         .subtitle { font-size: 0.8rem; color: #94a3b8; }
         .live-badge {
-            font-size: 0.8rem; color: #94a3b8;
+            font-size: 0.8rem;
             background: rgba(255,255,255,0.05);
             padding: 6px 14px; border-radius: 999px;
             border: 1px solid rgba(255,255,255,0.1);
+            display: flex; align-items: center; gap: 6px;
         }
+        .live-dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #22c55e;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .live-badge.disconnected .live-dot { background: #ef4444; animation: none; }
+        .live-badge.disconnected { color: #ef4444; }
         .summary {
             display: grid; grid-template-columns: repeat(4, 1fr);
             gap: 1rem; margin-bottom: 2rem;
@@ -231,41 +243,37 @@ DASHBOARD_HTML = """
             background: #1e293b; padding: 1rem; border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.1);
         }
+        .stat-card.updated { animation: flash 0.5s; }
+        @keyframes flash {
+            0% { background: #334155; }
+            100% { background: #1e293b; }
+        }
         .stat-label {
             font-size: 0.7rem; color: #94a3b8;
             text-transform: uppercase; letter-spacing: 0.05em;
         }
-        .stat-value { font-size: 1.5rem; font-weight: 700; }
+        .stat-value { font-size: 1.5rem; font-weight: 700; transition: color 0.3s; }
         .stat-unit { font-size: 0.8rem; }
         .node-card {
             background: #1e293b; border-radius: 10px; overflow: hidden;
             border: 1px solid rgba(255,255,255,0.1);
             margin-bottom: 1rem;
         }
+        .node-card.new-data { border-color: #60a5fa; }
         .node-header {
             display: flex; justify-content: space-between; align-items: center;
             padding: 1rem; cursor: pointer; user-select: none;
             background: rgba(0,0,0,0.25);
         }
         .node-header:hover { background: rgba(0,0,0,0.35); }
-        .node-title {
-            display: flex; align-items: center; gap: 1rem;
-        }
+        .node-title { display: flex; align-items: center; gap: 1rem; }
         .node-id { font-family: monospace; font-size: 1.1rem; font-weight: 700; color: #60a5fa; }
-        .node-stats {
-            display: flex; gap: 1.5rem; font-size: 0.85rem;
-        }
+        .node-stats { display: flex; gap: 1.5rem; font-size: 0.85rem; flex-wrap: wrap; }
         .node-stats span { color: #94a3b8; }
         .node-stats b { color: #f8fafc; }
-        .expand-icon {
-            font-size: 1.2rem; color: #94a3b8;
-            transition: transform 0.2s;
-        }
+        .expand-icon { font-size: 1.2rem; color: #94a3b8; transition: transform 0.2s; }
         .node-card.expanded .expand-icon { transform: rotate(180deg); }
-        .node-body {
-            display: none; padding: 0;
-            max-height: 400px; overflow-y: auto;
-        }
+        .node-body { display: none; padding: 0; max-height: 400px; overflow-y: auto; }
         .node-card.expanded .node-body { display: block; }
         table { width: 100%; border-collapse: collapse; text-align: left; }
         th {
@@ -274,31 +282,25 @@ DASHBOARD_HTML = """
             letter-spacing: 0.05em; background: #1e293b;
             position: sticky; top: 0;
         }
-        td {
-            padding: 0.5rem 1rem; font-size: 0.85rem;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-        }
+        td { padding: 0.5rem 1rem; font-size: 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.05); }
         tr:hover { background: rgba(255,255,255,0.03); }
-        .badge {
-            padding: 2px 6px; border-radius: 999px;
-            font-size: 0.65rem; font-weight: 700;
+        tr.new-row { animation: rowFlash 1s; }
+        @keyframes rowFlash {
+            0% { background: rgba(96, 165, 250, 0.2); }
+            100% { background: transparent; }
         }
+        .badge { padding: 2px 6px; border-radius: 999px; font-size: 0.65rem; font-weight: 700; }
         .badge-ok { background: #16a34a; color: #fff; }
         .badge-err { background: #dc2626; color: #fff; }
-        .badge-bridge {
-            background: #0c1a2e; color: #93c5fd;
-            border: 1px solid #1e40af;
-        }
+        .badge-bridge { background: #0c1a2e; color: #93c5fd; border: 1px solid #1e40af; }
         .green { color: #22c55e; }
         .yellow { color: #eab308; }
         .red { color: #ef4444; }
         .blue { color: #60a5fa; }
         .muted { color: #64748b; }
-        .empty-msg {
-            padding: 3rem; text-align: center;
-            color: #94a3b8; font-style: italic;
-        }
+        .empty-msg { padding: 3rem; text-align: center; color: #94a3b8; font-style: italic; }
         .time-col { font-family: monospace; color: #64748b; font-size: 0.8rem; }
+        #nodes-container { min-height: 100px; }
     </style>
 </head>
 <body>
@@ -308,114 +310,199 @@ DASHBOARD_HTML = """
                 <h1>LoRa Mesh Metrics Dashboard</h1>
                 <div class="subtitle">CSC2106 Group 33 — Latency Branch</div>
             </div>
-            <span class="live-badge">● Live</span>
+            <span class="live-badge" id="live-badge">
+                <span class="live-dot"></span>
+                <span id="live-text">Live</span>
+            </span>
         </div>
         
         <div class="summary">
-            <div class="stat-card">
+            <div class="stat-card" id="stat-throughput">
                 <div class="stat-label">Throughput</div>
-                <div class="stat-value blue">{{ "%.1f"|format(throughput) }} <span class="stat-unit">B/s</span></div>
+                <div class="stat-value blue" id="val-throughput">0.0 <span class="stat-unit">B/s</span></div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" id="stat-pdr">
                 <div class="stat-label">PDR</div>
-                <div class="stat-value {{ pdr_class }}">{{ "%.1f"|format(pdr) }}%</div>
+                <div class="stat-value green" id="val-pdr">100.0%</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" id="stat-rx">
                 <div class="stat-label">Packets RX</div>
-                <div class="stat-value green">{{ total_rx }}</div>
+                <div class="stat-value green" id="val-rx">0</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card" id="stat-lost">
                 <div class="stat-label">Packets Lost</div>
-                <div class="stat-value red">{{ total_lost }}</div>
+                <div class="stat-value red" id="val-lost">0</div>
             </div>
         </div>
         
-        {% if not nodes %}
-        <div class="node-card">
-            <div class="empty-msg">No data yet. Waiting for TTN uplinks...</div>
+        <div id="nodes-container">
+            <div class="empty-msg" id="empty-msg">No data yet. Waiting for TTN uplinks...</div>
         </div>
-        {% else %}
-        {% for sid, d in nodes|dictsort %}
-        <div class="node-card" id="node-{{ sid }}">
-            <div class="node-header" onclick="toggleNode('{{ sid }}')">
-                <div class="node-title">
-                    <span class="node-id">0x{{ "%02X"|format(sid|int) }}</span>
-                    <span class="badge {{ 'badge-ok' if d.ok else 'badge-err' }}">
-                        {{ "OK" if d.ok else "ERR" }}
-                    </span>
-                    <div class="node-stats">
-                        <span>Temp: <b>{{ "%.1f"|format(d.temp) if d.temp is number else d.temp }}°C</b></span>
-                        <span>Hum: <b>{{ "%.1f"|format(d.hum) if d.hum is number else d.hum }}%</b></span>
-                        <span>Latency: <b class="blue">{{ d.latency_ms if d.latency_ms else "-" }} ms</b></span>
-                        <span>PDR: <b class="{{ d.pdr_class }}">{{ "%.0f"|format(d.pdr) }}%</b></span>
-                        <span>Uptime: <b>{{ d.edge_uptime_s }}s</b></span>
-                    </div>
-                </div>
-                <span class="expand-icon">▼</span>
-            </div>
-            <div class="node-body">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Seq</th>
-                            <th>Temp</th>
-                            <th>Humidity</th>
-                            <th>Latency</th>
-                            <th>Hops</th>
-                            <th>Uptime</th>
-                            <th>Bridge</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for pkt in history.get(sid, []) %}
-                        <tr>
-                            <td class="time-col">{{ pkt.recv_time }}</td>
-                            <td>{{ pkt.seq }}</td>
-                            <td>{{ "%.1f"|format(pkt.temp) if pkt.temp is number else pkt.temp }}°C</td>
-                            <td>{{ "%.1f"|format(pkt.hum) if pkt.hum is number else pkt.hum }}%</td>
-                            <td class="blue">{{ pkt.latency_ms if pkt.latency_ms else "-" }} ms</td>
-                            <td>{{ pkt.hops }}</td>
-                            <td class="muted">{{ pkt.edge_uptime_s }}s</td>
-                            <td><span class="badge badge-bridge">{{ pkt.bridge }}</span></td>
-                            <td>
-                                <span class="badge {{ 'badge-ok' if pkt.ok else 'badge-err' }}">
-                                    {{ "OK" if pkt.ok else "ERR" }}
-                                </span>
-                            </td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="9" class="muted" style="text-align:center">No packet history</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        {% endfor %}
-        {% endif %}
     </div>
     
     <script>
+        let prevData = null;
+        let expandedNodes = JSON.parse(localStorage.getItem('expandedNodes') || '{}');
+        
         function toggleNode(sid) {
             const card = document.getElementById('node-' + sid);
-            card.classList.toggle('expanded');
-            // Save state to localStorage
-            const expanded = JSON.parse(localStorage.getItem('expandedNodes') || '{}');
-            expanded[sid] = card.classList.contains('expanded');
-            localStorage.setItem('expandedNodes', JSON.stringify(expanded));
+            if (card) {
+                card.classList.toggle('expanded');
+                expandedNodes[sid] = card.classList.contains('expanded');
+                localStorage.setItem('expandedNodes', JSON.stringify(expandedNodes));
+            }
         }
         
-        // Restore expanded state on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            const expanded = JSON.parse(localStorage.getItem('expandedNodes') || '{}');
-            for (const [sid, isExpanded] of Object.entries(expanded)) {
-                if (isExpanded) {
-                    const card = document.getElementById('node-' + sid);
-                    if (card) card.classList.add('expanded');
-                }
+        function formatNum(n, decimals=1) {
+            return typeof n === 'number' ? n.toFixed(decimals) : (n || '-');
+        }
+        
+        function flashElement(el) {
+            el.classList.add('updated');
+            setTimeout(() => el.classList.remove('updated'), 500);
+        }
+        
+        function renderNodes(nodes) {
+            const container = document.getElementById('nodes-container');
+            const emptyMsg = document.getElementById('empty-msg');
+            
+            if (Object.keys(nodes).length === 0) {
+                emptyMsg.style.display = 'block';
+                return;
             }
-        });
+            emptyMsg.style.display = 'none';
+            
+            const sortedIds = Object.keys(nodes).sort((a, b) => parseInt(a) - parseInt(b));
+            
+            sortedIds.forEach(sid => {
+                const d = nodes[sid];
+                let card = document.getElementById('node-' + sid);
+                const isNew = !card;
+                
+                if (isNew) {
+                    card = document.createElement('div');
+                    card.className = 'node-card';
+                    card.id = 'node-' + sid;
+                    container.appendChild(card);
+                }
+                
+                const pdrClass = d.pdr >= 95 ? 'green' : (d.pdr >= 80 ? 'yellow' : 'red');
+                const statusBadge = d.ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-err">ERR</span>';
+                
+                let historyRows = '';
+                if (d.history && d.history.length > 0) {
+                    d.history.forEach((pkt, idx) => {
+                        const isNewRow = idx === 0 && prevData && prevData.nodes[sid] && 
+                                         prevData.nodes[sid].history && prevData.nodes[sid].history.length > 0 &&
+                                         pkt.seq !== prevData.nodes[sid].history[0].seq;
+                        historyRows += '<tr class="' + (isNewRow ? 'new-row' : '') + '">' +
+                            '<td class="time-col">' + (pkt.recv_time || '-') + '</td>' +
+                            '<td>' + pkt.seq + '</td>' +
+                            '<td>' + formatNum(pkt.temp) + '°C</td>' +
+                            '<td>' + formatNum(pkt.hum) + '%</td>' +
+                            '<td class="blue">' + (pkt.latency_ms || '-') + ' ms</td>' +
+                            '<td>' + pkt.hops + '</td>' +
+                            '<td class="muted">' + (pkt.edge_uptime_s || 0) + 's</td>' +
+                            '<td><span class="badge badge-bridge">' + pkt.bridge + '</span></td>' +
+                            '<td>' + (pkt.ok ? '<span class="badge badge-ok">OK</span>' : '<span class="badge badge-err">ERR</span>') + '</td>' +
+                            '</tr>';
+                    });
+                } else {
+                    historyRows = '<tr><td colspan="9" class="muted" style="text-align:center">No packet history</td></tr>';
+                }
+                
+                const expanded = expandedNodes[sid] ? 'expanded' : '';
+                const nodeHex = '0x' + parseInt(sid).toString(16).toUpperCase().padStart(2, '0');
+                
+                card.className = 'node-card ' + expanded;
+                card.innerHTML = 
+                    '<div class="node-header" onclick="toggleNode(\\''+sid+'\\')">' +
+                        '<div class="node-title">' +
+                            '<span class="node-id">' + nodeHex + '</span>' +
+                            statusBadge +
+                            '<div class="node-stats">' +
+                                '<span>Temp: <b>' + formatNum(d.temp) + '°C</b></span>' +
+                                '<span>Hum: <b>' + formatNum(d.hum) + '%</b></span>' +
+                                '<span>Latency: <b class="blue">' + (d.latency_ms || '-') + ' ms</b></span>' +
+                                '<span>PDR: <b class="' + pdrClass + '">' + formatNum(d.pdr, 0) + '%</b></span>' +
+                                '<span>Hops: <b>' + d.hops + '</b></span>' +
+                                '<span>Uptime: <b>' + (d.edge_uptime_s || 0) + 's</b></span>' +
+                            '</div>' +
+                        '</div>' +
+                        '<span class="expand-icon">▼</span>' +
+                    '</div>' +
+                    '<div class="node-body">' +
+                        '<table>' +
+                            '<thead><tr>' +
+                                '<th>Time</th><th>Seq</th><th>Temp</th><th>Humidity</th>' +
+                                '<th>Latency</th><th>Hops</th><th>Uptime</th><th>Bridge</th><th>Status</th>' +
+                            '</tr></thead>' +
+                            '<tbody>' + historyRows + '</tbody>' +
+                        '</table>' +
+                    '</div>';
+                
+                if (isNew) {
+                    card.classList.add('new-data');
+                    setTimeout(() => card.classList.remove('new-data'), 1000);
+                }
+            });
+        }
+        
+        function updateDashboard(data) {
+            const throughputEl = document.getElementById('val-throughput');
+            const pdrEl = document.getElementById('val-pdr');
+            const rxEl = document.getElementById('val-rx');
+            const lostEl = document.getElementById('val-lost');
+            
+            const newThroughput = data.throughput_bps.toFixed(1) + ' <span class="stat-unit">B/s</span>';
+            if (throughputEl.innerHTML !== newThroughput) {
+                throughputEl.innerHTML = newThroughput;
+                flashElement(document.getElementById('stat-throughput'));
+            }
+            
+            const newPdr = data.pdr_overall.toFixed(1) + '%';
+            if (pdrEl.textContent !== newPdr) {
+                pdrEl.textContent = newPdr;
+                pdrEl.className = 'stat-value ' + data.pdr_class;
+                flashElement(document.getElementById('stat-pdr'));
+            }
+            
+            if (rxEl.textContent !== String(data.total_packets)) {
+                rxEl.textContent = data.total_packets;
+                flashElement(document.getElementById('stat-rx'));
+            }
+            
+            if (lostEl.textContent !== String(data.total_lost)) {
+                lostEl.textContent = data.total_lost;
+                flashElement(document.getElementById('stat-lost'));
+            }
+            
+            renderNodes(data.nodes);
+            prevData = data;
+        }
+        
+        async function fetchData() {
+            const badge = document.getElementById('live-badge');
+            const liveText = document.getElementById('live-text');
+            
+            try {
+                const response = await fetch('/api/metrics');
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                
+                const data = await response.json();
+                updateDashboard(data);
+                
+                badge.classList.remove('disconnected');
+                liveText.textContent = 'Live';
+            } catch (err) {
+                console.error('Fetch error:', err);
+                badge.classList.add('disconnected');
+                liveText.textContent = 'Disconnected';
+            }
+        }
+        
+        fetchData();
+        setInterval(fetchData, 2000);
     </script>
 </body>
 </html>
@@ -423,52 +510,31 @@ DASHBOARD_HTML = """
 
 @app.route("/")
 def dashboard():
-    with lock:
-        throughput = get_throughput_bps()
-        pdr = get_overall_pdr()
-        total_rx = metrics["total_packets"]
-        total_lost = metrics["total_lost"]
-        
-        # Add per-node PDR to nodes dict for template
-        nodes_with_pdr = {}
-        for sid, d in nodes.items():
-            node_pdr = get_node_pdr(sid)
-            pdr_class = "green" if node_pdr >= 95 else ("yellow" if node_pdr >= 80 else "red")
-            nodes_with_pdr[sid] = {**d, "pdr": node_pdr, "pdr_class": pdr_class}
-        
-        # Copy packet history
-        history_copy = {sid: list(pkts) for sid, pkts in packet_history.items()}
-    
-    pdr_class = "green" if pdr >= 95 else ("yellow" if pdr >= 80 else "red")
-    
-    return render_template_string(
-        DASHBOARD_HTML,
-        throughput=throughput,
-        pdr=pdr,
-        pdr_class=pdr_class,
-        total_rx=total_rx,
-        total_lost=total_lost,
-        nodes=nodes_with_pdr,
-        history=history_copy
-    )
+    return DASHBOARD_HTML
 
 @app.route("/api/metrics")
 def api_metrics():
-    """JSON API endpoint for metrics."""
+    """JSON API endpoint for metrics with full packet history."""
     with lock:
+        nodes_data = {}
+        for sid, d in nodes.items():
+            node_pdr = get_node_pdr(sid)
+            nodes_data[sid] = {
+                **d,
+                "pdr": node_pdr,
+                "pdr_class": "green" if node_pdr >= 95 else ("yellow" if node_pdr >= 80 else "red"),
+                "avg_latency_ms": get_node_avg_latency(sid),
+                "history": packet_history.get(sid, [])
+            }
+        
+        pdr = get_overall_pdr()
         return {
             "throughput_bps": get_throughput_bps(),
-            "pdr_overall": get_overall_pdr(),
+            "pdr_overall": pdr,
+            "pdr_class": "green" if pdr >= 95 else ("yellow" if pdr >= 80 else "red"),
             "total_packets": metrics["total_packets"],
             "total_lost": metrics["total_lost"],
-            "nodes": {
-                sid: {
-                    **d,
-                    "pdr": get_node_pdr(sid),
-                    "avg_latency_ms": get_node_avg_latency(sid)
-                }
-                for sid, d in nodes.items()
-            }
+            "nodes": nodes_data
         }
 
 def mqtt_thread():
@@ -489,7 +555,6 @@ def mqtt_thread():
             time.sleep(5)
 
 def main():
-    # Start MQTT in background
     mqtt_t = threading.Thread(target=mqtt_thread, daemon=True)
     mqtt_t.start()
     
@@ -497,7 +562,6 @@ def main():
     print("Dashboard starting at http://0.0.0.0:5000")
     print("=" * 50)
     
-    # Run Flask (use 0.0.0.0 to allow external access)
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 
 if __name__ == "__main__":
