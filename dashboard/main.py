@@ -1,30 +1,42 @@
-import network, time, json
-import socket
-from umqtt.simple import MQTTClient
+#!/usr/bin/env python3
+"""
+LoRa Mesh Metrics Dashboard for Raspberry Pi
+CSC2106 Group 33
 
-# ── WiFi Configuration ──
-WIFI_SSID = "premierlin"
-WIFI_PASS = "12345678"
+Runs a web dashboard that subscribes to TTN MQTT and displays
+real-time sensor data with metrics (latency, PDR, throughput).
+
+Usage:
+    pip install paho-mqtt flask
+    python main_pi.py
+
+Then open http://<pi-ip>:5000 in your browser.
+"""
+
+import json
+import time
+import threading
+from flask import Flask, render_template_string
+import paho.mqtt.client as mqtt
 
 # ── TTN Configuration ──
-# For local testing, use the public test broker with no auth.
-# Change TTN_SERVER back to "as1.cloud.thethings.network" and fill in TTN_API_KEY
-# when connecting to real TTN.
 TTN_APP_ID  = "sit-csc2106-g33"
 TTN_API_KEY = "NNSXS.NRPKTDG3KGMLAO2KY37ZYTMJDKEN3CJMKZLCA7A.V7MH2LTQZSABZ6RZHOCQXSJBKZXLMK5U7BK7NBBLGED2DBNXRVFA"
 TTN_SERVER  = "au1.cloud.thethings.network"
+TTN_PORT    = 1883
 
-# Wildcard '+' subscribes to ALL edge devices (edge-01, edge-06, etc.)
-TOPIC_TEST  = "csc2106-g33-dashboard-test/v3/sit-csc2106-g33@ttn/devices/+/up"
-TOPIC_TTN   = "v3/" + TTN_APP_ID + "@ttn/devices/+/up"
-TOPIC       = TOPIC_TTN if TTN_API_KEY else TOPIC_TEST
+# Wildcard '+' subscribes to ALL edge devices
+TOPIC_TTN = f"v3/{TTN_APP_ID}@ttn/devices/+/up"
 
 # ── Metrics Configuration ──
-THROUGHPUT_WINDOW_S = 30  # 30-second rolling window for throughput
-MAX_LATENCY_HISTORY = 10  # Keep last 10 latency samples per node
+THROUGHPUT_WINDOW_S = 30
+MAX_LATENCY_HISTORY = 10
+MAX_PACKET_HISTORY = 50  # Keep last 50 packets per node for display
 
 # ── State ──
-nodes = {}  # keyed by src_id string
+nodes = {}  # keyed by src_id string (latest values)
+packet_history = {}  # keyed by src_id: list of packet dicts with timestamps
+lock = threading.Lock()
 
 # ── Metrics State ──
 metrics = {
@@ -34,33 +46,28 @@ metrics = {
     "start_time": None
 }
 
-# Per-node metrics tracking
-node_metrics = {}  # keyed by src_id: {last_seq, latencies, hops, packets_received, packets_lost}
+node_metrics = {}  # keyed by src_id
 
 def init_node_metrics(sid):
-    """Initialize metrics tracking for a new node."""
     if sid not in node_metrics:
         node_metrics[sid] = {
             "last_seq": None,
-            "latencies": [],      # Recent latency samples
-            "hops": [],           # Recent hop counts
+            "latencies": [],
+            "hops": [],
             "packets_received": 0,
             "packets_lost": 0
         }
 
 def update_metrics(readings, payload_size):
-    """Update metrics from a new batch of readings."""
     global metrics
     
     if metrics["start_time"] is None:
         metrics["start_time"] = time.time()
     
     now = time.time()
-    
-    # Track bytes for throughput (approximate: payload_size per uplink)
     metrics["bytes_received"].append((now, payload_size))
     
-    # Prune old throughput data (older than window)
+    # Prune old throughput data
     cutoff = now - THROUGHPUT_WINDOW_S
     metrics["bytes_received"] = [(t, b) for t, b in metrics["bytes_received"] if t > cutoff]
     
@@ -73,31 +80,25 @@ def update_metrics(readings, payload_size):
         init_node_metrics(sid)
         nm = node_metrics[sid]
         
-        # Track latency (only if valid)
         if latency_ms > 0:
             nm["latencies"].append(latency_ms)
             if len(nm["latencies"]) > MAX_LATENCY_HISTORY:
                 nm["latencies"].pop(0)
         
-        # Track hop count
         nm["hops"].append(hops)
         if len(nm["hops"]) > MAX_LATENCY_HISTORY:
             nm["hops"].pop(0)
         
-        # Calculate PDR from sequence gaps
         nm["packets_received"] += 1
         metrics["total_packets"] += 1
         
         if nm["last_seq"] is not None:
             expected_seq = (nm["last_seq"] + 1) % 256
             if seq != expected_seq:
-                # Calculate gap (handle wraparound)
                 if seq > nm["last_seq"]:
                     gap = seq - nm["last_seq"] - 1
                 else:
                     gap = (256 - nm["last_seq"]) + seq - 1
-                
-                # Cap gap at reasonable value (avoid counting huge jumps as loss)
                 gap = min(gap, 10)
                 nm["packets_lost"] += gap
                 metrics["total_lost"] += gap
@@ -105,316 +106,399 @@ def update_metrics(readings, payload_size):
         nm["last_seq"] = seq
 
 def get_throughput_bps():
-    """Calculate throughput in bytes per second over the rolling window."""
     if not metrics["bytes_received"]:
         return 0
-    
     now = time.time()
     cutoff = now - THROUGHPUT_WINDOW_S
     recent = [(t, b) for t, b in metrics["bytes_received"] if t > cutoff]
-    
     if not recent:
         return 0
-    
     total_bytes = sum(b for _, b in recent)
     elapsed = now - recent[0][0]
-    
-    if elapsed <= 0:
-        return 0
-    
-    return total_bytes / elapsed
+    return total_bytes / elapsed if elapsed > 0 else 0
 
 def get_overall_pdr():
-    """Calculate overall Packet Delivery Ratio."""
     total_rx = metrics["total_packets"]
     total_lost = metrics["total_lost"]
     total_sent = total_rx + total_lost
-    
-    if total_sent == 0:
-        return 100.0
-    
-    return (total_rx / total_sent) * 100
+    return (total_rx / total_sent) * 100 if total_sent > 0 else 100.0
 
 def get_node_pdr(sid):
-    """Calculate PDR for a specific node."""
     if sid not in node_metrics:
         return 100.0
-    
     nm = node_metrics[sid]
     total_rx = nm["packets_received"]
     total_lost = nm["packets_lost"]
     total_sent = total_rx + total_lost
-    
-    if total_sent == 0:
-        return 100.0
-    
-    return (total_rx / total_sent) * 100
+    return (total_rx / total_sent) * 100 if total_sent > 0 else 100.0
 
 def get_node_avg_latency(sid):
-    """Get average latency for a node."""
     if sid not in node_metrics or not node_metrics[sid]["latencies"]:
         return None
-    
     lat = node_metrics[sid]["latencies"]
     return sum(lat) // len(lat)
 
-def get_node_avg_hops(sid):
-    """Get average hop count for a node."""
-    if sid not in node_metrics or not node_metrics[sid]["hops"]:
-        return None
-    
-    hops = node_metrics[sid]["hops"]
-    return sum(hops) / len(hops)
-
-# ── WiFi Connection ──
-def connect_wifi():
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    if not wlan.isconnected():
-        print("Connecting to WiFi", WIFI_SSID, "...")
-        wlan.connect(WIFI_SSID, WIFI_PASS)
-        attempts = 0
-        while not wlan.isconnected() and attempts < 20:
-            time.sleep(0.5)
-            attempts += 1
-            print(".", end="")
-    if wlan.isconnected():
-        print("\nWiFi connected:", wlan.ifconfig())
-        return wlan.ifconfig()[0]
+# ── MQTT Callbacks ──
+def on_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        print(f"Connected to TTN MQTT broker")
+        client.subscribe(TOPIC_TTN)
+        print(f"Subscribed to: {TOPIC_TTN}")
     else:
-        print("\nWiFi connection failed.")
-        return None
+        print(f"MQTT connection failed with code {rc}")
 
-# ── MQTT Callback ──
-def on_message(topic, msg):
+def on_message(client, userdata, msg):
     try:
-        payload = json.loads(msg)
+        payload = json.loads(msg.payload.decode())
         decoded = payload.get("uplink_message", {}).get("decoded_payload", {})
         readings = decoded.get("readings", [])
         bridge_id = decoded.get("bridge_id", "?")
         
-        # Estimate payload size for throughput calculation (rough: ~20 bytes per reading)
         payload_size = len(readings) * 20
         
-        # Update metrics with new readings
-        update_metrics(readings, payload_size)
-        
-        for r in readings:
-            sid = str(r.get("src_id", "?"))
-            nodes[sid] = {
-                "temp":       r.get("temperature_c", "?"),
-                "hum":        r.get("humidity_pct", "?"),
-                "hops":       r.get("hops", "?"),
-                "latency_ms": r.get("latency_ms", 0),
-                "seq":        r.get("seq", 0),
-                "ok":         r.get("sensor_ok", False),
-                "bridge":     bridge_id,
-            }
-        print("Updated", len(readings), "readings from bridge", bridge_id)
-    except Exception as e:
-        print("MQTT parse error:", e)
-
-# ── Dashboard HTML ──
-def dashboard_html():
-    # Calculate summary metrics
-    throughput = get_throughput_bps()
-    overall_pdr = get_overall_pdr()
-    total_rx = metrics["total_packets"]
-    total_lost = metrics["total_lost"]
-    
-    # Build summary panel
-    summary_html = (
-        "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem'>"
-        "<div style='background:#1e293b;padding:1rem;border-radius:8px;border:1px solid rgba(255,255,255,0.1)'>"
-        "<div style='font-size:0.7rem;color:#94a3b8;text-transform:uppercase'>Throughput</div>"
-        "<div style='font-size:1.5rem;font-weight:700;color:#60a5fa'>{:.1f} <span style='font-size:0.8rem'>B/s</span></div>"
-        "</div>"
-        "<div style='background:#1e293b;padding:1rem;border-radius:8px;border:1px solid rgba(255,255,255,0.1)'>"
-        "<div style='font-size:0.7rem;color:#94a3b8;text-transform:uppercase'>PDR</div>"
-        "<div style='font-size:1.5rem;font-weight:700;color:{}'>{:.1f}%</div>"
-        "</div>"
-        "<div style='background:#1e293b;padding:1rem;border-radius:8px;border:1px solid rgba(255,255,255,0.1)'>"
-        "<div style='font-size:0.7rem;color:#94a3b8;text-transform:uppercase'>Packets RX</div>"
-        "<div style='font-size:1.5rem;font-weight:700;color:#22c55e'>{}</div>"
-        "</div>"
-        "<div style='background:#1e293b;padding:1rem;border-radius:8px;border:1px solid rgba(255,255,255,0.1)'>"
-        "<div style='font-size:0.7rem;color:#94a3b8;text-transform:uppercase'>Packets Lost</div>"
-        "<div style='font-size:1.5rem;font-weight:700;color:#ef4444'>{}</div>"
-        "</div>"
-        "</div>"
-    ).format(
-        throughput,
-        "#22c55e" if overall_pdr >= 95 else ("#eab308" if overall_pdr >= 80 else "#ef4444"),
-        overall_pdr,
-        total_rx,
-        total_lost
-    )
-    
-    # Build node rows
-    rows = ""
-    if not nodes:
-        rows = "<tr><td colspan='9' style='padding:2rem;text-align:center;color:#94a3b8;font-style:italic'>No data yet. Waiting for TTN uplinks...</td></tr>"
-    else:
-        for sid, d in sorted(nodes.items()):
-            ok = d["ok"]
-            status_txt = "OK" if ok else "ERR"
-            if ok:
-                badge_style = "background:#16a34a;color:#ffffff;border:1px solid #15803d"
-            else:
-                badge_style = "background:#dc2626;color:#ffffff;border:1px solid #b91c1c"
-
-            temp_str = "{:.1f}".format(d["temp"]) if isinstance(d["temp"], (int, float)) else str(d["temp"])
-            hum_str  = "{:.1f}".format(d["hum"])  if isinstance(d["hum"],  (int, float)) else str(d["hum"])
+        with lock:
+            update_metrics(readings, payload_size)
+            recv_time = time.strftime("%H:%M:%S")
             
-            # Get per-node metrics
-            avg_latency = get_node_avg_latency(sid)
-            latency_str = "{}".format(avg_latency) if avg_latency else "-"
-            node_pdr = get_node_pdr(sid)
-            pdr_color = "#22c55e" if node_pdr >= 95 else ("#eab308" if node_pdr >= 80 else "#ef4444")
-
-            rows += (
-                "<tr>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08);font-family:monospace;font-size:1rem;font-weight:700'>"
-                + "0x{:02X}".format(int(sid))
-                + "</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'><b>" + temp_str + "</b> &deg;C</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'><b>" + hum_str  + "</b> %</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + str(d["hops"]) + "</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08);color:#60a5fa'>" + latency_str + " ms</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08);color:" + pdr_color + "'>{:.0f}%</td>".format(node_pdr)
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>"
-                + "<span style='background:#0c1a2e;color:#93c5fd;border:1px solid #1e40af;padding:3px 10px;border-radius:999px;font-size:0.7rem;font-weight:700'>Bridge " + str(d["bridge"]) + "</span>"
-                + "</td>"
-                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>"
-                + "<span style='" + badge_style + ";padding:3px 8px;border-radius:999px;font-size:0.7rem;font-weight:700'>" + status_txt + "</span>"
-                + "</td>"
-                + "</tr>"
-            )
-
-    # Compact, no external CSS. All styles are inline.
-    page = (
-        "<!DOCTYPE html><html lang='en'><head>"
-        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<meta http-equiv='refresh' content='10'>"
-        "<title>G33 Mesh Metrics Dashboard</title>"
-        "</head>"
-        "<body style='margin:0;padding:2rem 1rem;background:#0f172a;color:#f8fafc;"
-        "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif'>"
-        "<div style='max-width:1200px;margin:0 auto'>"
-        "<div style='display:flex;justify-content:space-between;align-items:center;"
-        "border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:1rem;margin-bottom:2rem'>"
-        "<div>"
-        "<h1 style='font-size:1.5rem;font-weight:700;color:#60a5fa;margin:0'>LoRa Mesh Metrics Dashboard</h1>"
-        "<div style='font-size:0.8rem;color:#94a3b8'>CSC2106 Group 33 — Latency Branch</div>"
-        "</div>"
-        "<span style='font-size:0.8rem;color:#94a3b8;background:rgba(255,255,255,0.05);"
-        "padding:6px 14px;border-radius:999px;border:1px solid rgba(255,255,255,0.1)'>&#x25CF; Live</span>"
-        "</div>"
-        + summary_html +
-        "<div style='background:#1e293b;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,0.1)'>"
-        "<table style='width:100%;border-collapse:collapse;text-align:left'>"
-        "<thead><tr style='background:rgba(0,0,0,0.25)'>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Node</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Temp</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Humidity</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Hops</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Latency</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>PDR</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Bridge</th>"
-        "<th style='padding:0.6rem 1rem;font-size:0.65rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Status</th>"
-        "</tr></thead>"
-        "<tbody>" + rows + "</tbody>"
-        "</table></div></div></body></html>"
-    )
-    return page
-
-# ── HTTP response sender (chunked for Pico W safety) ──
-def send_response(cl, html):
-    cl.send(b"HTTP/1.1 200 OK\r\n")
-    cl.send(b"Content-Type: text/html\r\n")
-    cl.send(b"Connection: close\r\n\r\n")
-    data = html.encode("utf-8")
-    total = len(data)
-    sent = 0
-    while sent < total:
-        chunk = data[sent:sent + 512]
-        try:
-            n = cl.send(chunk)
-            if n > 0:
-                sent += n
-        except OSError as e:
-            if e.args[0] == 11:   # EAGAIN — buffer full, wait and retry
-                time.sleep(0.05)
-            else:
-                print("Socket error:", e)
-                break
-    time.sleep(0.1)  # Flush before caller closes
-
-# ── Main Entry ──
-def main():
-    ip = connect_wifi()
-    if not ip:
-        print("WiFi failed. Rebooting in 10s...")
-        time.sleep(10)
-        import machine
-        machine.reset()
-
-    # Connect to MQTT (no auth for test broker)
-    if TTN_API_KEY:
-        client = MQTTClient("picow-g33", TTN_SERVER,
-                            user=TTN_APP_ID + "@ttn", password=TTN_API_KEY, port=1883)
-    else:
-        client = MQTTClient("picow-g33", TTN_SERVER, port=1883)
-
-    client.set_callback(on_message)
-
-    try:
-        print("Connecting to MQTT:", TTN_SERVER)
-        client.connect()
-        client.subscribe(TOPIC)
-        print("Subscribed:", TOPIC)
+            for r in readings:
+                sid = str(r.get("src_id", "?"))
+                packet_data = {
+                    "temp": r.get("temperature_c", "?"),
+                    "hum": r.get("humidity_pct", "?"),
+                    "hops": r.get("hops", "?"),
+                    "latency_ms": r.get("latency_ms", 0),
+                    "seq": r.get("seq", 0),
+                    "edge_uptime_s": r.get("edge_uptime_s", 0),
+                    "ok": r.get("sensor_ok", False),
+                    "bridge": bridge_id,
+                    "recv_time": recv_time,
+                }
+                
+                # Update latest state
+                nodes[sid] = packet_data
+                
+                # Add to packet history
+                if sid not in packet_history:
+                    packet_history[sid] = []
+                packet_history[sid].insert(0, packet_data)  # Newest first
+                if len(packet_history[sid]) > MAX_PACKET_HISTORY:
+                    packet_history[sid].pop()
+        
+        print(f"Updated {len(readings)} readings from bridge {bridge_id}")
     except Exception as e:
-        print("MQTT connect failed:", e)
-        time.sleep(5)
-        import machine
-        machine.reset()
+        print(f"MQTT parse error: {e}")
 
-    # HTTP server (non-blocking via settimeout)
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", 80))
-    server.listen(1)
-    server.settimeout(0.5)
-    print("====================================")
-    print("Dashboard at http://{}".format(ip))
-    print("====================================")
+# ── Flask App ──
+app = Flask(__name__)
 
+DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="5">
+    <title>G33 Mesh Metrics Dashboard</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 2rem 1rem;
+            background: #0f172a; color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 1rem; margin-bottom: 2rem;
+        }
+        h1 { font-size: 1.5rem; font-weight: 700; color: #60a5fa; margin: 0; }
+        .subtitle { font-size: 0.8rem; color: #94a3b8; }
+        .live-badge {
+            font-size: 0.8rem; color: #94a3b8;
+            background: rgba(255,255,255,0.05);
+            padding: 6px 14px; border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .summary {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 1rem; margin-bottom: 2rem;
+        }
+        @media (max-width: 768px) {
+            .summary { grid-template-columns: repeat(2, 1fr); }
+        }
+        .stat-card {
+            background: #1e293b; padding: 1rem; border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .stat-label {
+            font-size: 0.7rem; color: #94a3b8;
+            text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        .stat-value { font-size: 1.5rem; font-weight: 700; }
+        .stat-unit { font-size: 0.8rem; }
+        .node-card {
+            background: #1e293b; border-radius: 10px; overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 1rem;
+        }
+        .node-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 1rem; cursor: pointer; user-select: none;
+            background: rgba(0,0,0,0.25);
+        }
+        .node-header:hover { background: rgba(0,0,0,0.35); }
+        .node-title {
+            display: flex; align-items: center; gap: 1rem;
+        }
+        .node-id { font-family: monospace; font-size: 1.1rem; font-weight: 700; color: #60a5fa; }
+        .node-stats {
+            display: flex; gap: 1.5rem; font-size: 0.85rem;
+        }
+        .node-stats span { color: #94a3b8; }
+        .node-stats b { color: #f8fafc; }
+        .expand-icon {
+            font-size: 1.2rem; color: #94a3b8;
+            transition: transform 0.2s;
+        }
+        .node-card.expanded .expand-icon { transform: rotate(180deg); }
+        .node-body {
+            display: none; padding: 0;
+            max-height: 400px; overflow-y: auto;
+        }
+        .node-card.expanded .node-body { display: block; }
+        table { width: 100%; border-collapse: collapse; text-align: left; }
+        th {
+            padding: 0.5rem 1rem; font-size: 0.6rem;
+            text-transform: uppercase; color: #94a3b8;
+            letter-spacing: 0.05em; background: #1e293b;
+            position: sticky; top: 0;
+        }
+        td {
+            padding: 0.5rem 1rem; font-size: 0.85rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        tr:hover { background: rgba(255,255,255,0.03); }
+        .badge {
+            padding: 2px 6px; border-radius: 999px;
+            font-size: 0.65rem; font-weight: 700;
+        }
+        .badge-ok { background: #16a34a; color: #fff; }
+        .badge-err { background: #dc2626; color: #fff; }
+        .badge-bridge {
+            background: #0c1a2e; color: #93c5fd;
+            border: 1px solid #1e40af;
+        }
+        .green { color: #22c55e; }
+        .yellow { color: #eab308; }
+        .red { color: #ef4444; }
+        .blue { color: #60a5fa; }
+        .muted { color: #64748b; }
+        .empty-msg {
+            padding: 3rem; text-align: center;
+            color: #94a3b8; font-style: italic;
+        }
+        .time-col { font-family: monospace; color: #64748b; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1>LoRa Mesh Metrics Dashboard</h1>
+                <div class="subtitle">CSC2106 Group 33 — Latency Branch</div>
+            </div>
+            <span class="live-badge">● Live</span>
+        </div>
+        
+        <div class="summary">
+            <div class="stat-card">
+                <div class="stat-label">Throughput</div>
+                <div class="stat-value blue">{{ "%.1f"|format(throughput) }} <span class="stat-unit">B/s</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">PDR</div>
+                <div class="stat-value {{ pdr_class }}">{{ "%.1f"|format(pdr) }}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Packets RX</div>
+                <div class="stat-value green">{{ total_rx }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Packets Lost</div>
+                <div class="stat-value red">{{ total_lost }}</div>
+            </div>
+        </div>
+        
+        {% if not nodes %}
+        <div class="node-card">
+            <div class="empty-msg">No data yet. Waiting for TTN uplinks...</div>
+        </div>
+        {% else %}
+        {% for sid, d in nodes|dictsort %}
+        <div class="node-card" id="node-{{ sid }}">
+            <div class="node-header" onclick="toggleNode('{{ sid }}')">
+                <div class="node-title">
+                    <span class="node-id">0x{{ "%02X"|format(sid|int) }}</span>
+                    <span class="badge {{ 'badge-ok' if d.ok else 'badge-err' }}">
+                        {{ "OK" if d.ok else "ERR" }}
+                    </span>
+                    <div class="node-stats">
+                        <span>Temp: <b>{{ "%.1f"|format(d.temp) if d.temp is number else d.temp }}°C</b></span>
+                        <span>Hum: <b>{{ "%.1f"|format(d.hum) if d.hum is number else d.hum }}%</b></span>
+                        <span>Latency: <b class="blue">{{ d.latency_ms if d.latency_ms else "-" }} ms</b></span>
+                        <span>PDR: <b class="{{ d.pdr_class }}">{{ "%.0f"|format(d.pdr) }}%</b></span>
+                        <span>Uptime: <b>{{ d.edge_uptime_s }}s</b></span>
+                    </div>
+                </div>
+                <span class="expand-icon">▼</span>
+            </div>
+            <div class="node-body">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Seq</th>
+                            <th>Temp</th>
+                            <th>Humidity</th>
+                            <th>Latency</th>
+                            <th>Hops</th>
+                            <th>Uptime</th>
+                            <th>Bridge</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pkt in history.get(sid, []) %}
+                        <tr>
+                            <td class="time-col">{{ pkt.recv_time }}</td>
+                            <td>{{ pkt.seq }}</td>
+                            <td>{{ "%.1f"|format(pkt.temp) if pkt.temp is number else pkt.temp }}°C</td>
+                            <td>{{ "%.1f"|format(pkt.hum) if pkt.hum is number else pkt.hum }}%</td>
+                            <td class="blue">{{ pkt.latency_ms if pkt.latency_ms else "-" }} ms</td>
+                            <td>{{ pkt.hops }}</td>
+                            <td class="muted">{{ pkt.edge_uptime_s }}s</td>
+                            <td><span class="badge badge-bridge">{{ pkt.bridge }}</span></td>
+                            <td>
+                                <span class="badge {{ 'badge-ok' if pkt.ok else 'badge-err' }}">
+                                    {{ "OK" if pkt.ok else "ERR" }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr><td colspan="9" class="muted" style="text-align:center">No packet history</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+    </div>
+    
+    <script>
+        function toggleNode(sid) {
+            const card = document.getElementById('node-' + sid);
+            card.classList.toggle('expanded');
+            // Save state to localStorage
+            const expanded = JSON.parse(localStorage.getItem('expandedNodes') || '{}');
+            expanded[sid] = card.classList.contains('expanded');
+            localStorage.setItem('expandedNodes', JSON.stringify(expanded));
+        }
+        
+        // Restore expanded state on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const expanded = JSON.parse(localStorage.getItem('expandedNodes') || '{}');
+            for (const [sid, isExpanded] of Object.entries(expanded)) {
+                if (isExpanded) {
+                    const card = document.getElementById('node-' + sid);
+                    if (card) card.classList.add('expanded');
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def dashboard():
+    with lock:
+        throughput = get_throughput_bps()
+        pdr = get_overall_pdr()
+        total_rx = metrics["total_packets"]
+        total_lost = metrics["total_lost"]
+        
+        # Add per-node PDR to nodes dict for template
+        nodes_with_pdr = {}
+        for sid, d in nodes.items():
+            node_pdr = get_node_pdr(sid)
+            pdr_class = "green" if node_pdr >= 95 else ("yellow" if node_pdr >= 80 else "red")
+            nodes_with_pdr[sid] = {**d, "pdr": node_pdr, "pdr_class": pdr_class}
+        
+        # Copy packet history
+        history_copy = {sid: list(pkts) for sid, pkts in packet_history.items()}
+    
+    pdr_class = "green" if pdr >= 95 else ("yellow" if pdr >= 80 else "red")
+    
+    return render_template_string(
+        DASHBOARD_HTML,
+        throughput=throughput,
+        pdr=pdr,
+        pdr_class=pdr_class,
+        total_rx=total_rx,
+        total_lost=total_lost,
+        nodes=nodes_with_pdr,
+        history=history_copy
+    )
+
+@app.route("/api/metrics")
+def api_metrics():
+    """JSON API endpoint for metrics."""
+    with lock:
+        return {
+            "throughput_bps": get_throughput_bps(),
+            "pdr_overall": get_overall_pdr(),
+            "total_packets": metrics["total_packets"],
+            "total_lost": metrics["total_lost"],
+            "nodes": {
+                sid: {
+                    **d,
+                    "pdr": get_node_pdr(sid),
+                    "avg_latency_ms": get_node_avg_latency(sid)
+                }
+                for sid, d in nodes.items()
+            }
+        }
+
+def mqtt_thread():
+    """Run MQTT client in background thread."""
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pi-g33-dashboard")
+    client.username_pw_set(f"{TTN_APP_ID}@ttn", TTN_API_KEY)
+    client.on_connect = on_connect
+    client.on_message = on_message
+    
+    print(f"Connecting to MQTT: {TTN_SERVER}:{TTN_PORT}")
+    
     while True:
-        # Poll MQTT
         try:
-            client.check_msg()
+            client.connect(TTN_SERVER, TTN_PORT, keepalive=60)
+            client.loop_forever()
         except Exception as e:
-            print("MQTT error, reconnecting:", e)
-            try:
-                client.connect()
-                client.subscribe(TOPIC)
-            except Exception:
-                pass
+            print(f"MQTT error: {e}, reconnecting in 5s...")
+            time.sleep(5)
 
-        # Serve HTTP
-        try:
-            cl, addr = server.accept()
-            cl.settimeout(5)  # prevent a slow client from blocking forever
-            print("HTTP from", addr)
-            try:
-                cl.recv(1024)           # consume the request headers
-                send_response(cl, dashboard_html())
-            finally:
-                cl.close()              # always close the socket, even on error
-        except OSError:
-            pass  # accept() timed out — normal in non-blocking mode
-
-        time.sleep(0.05)
+def main():
+    # Start MQTT in background
+    mqtt_t = threading.Thread(target=mqtt_thread, daemon=True)
+    mqtt_t.start()
+    
+    print("=" * 50)
+    print("Dashboard starting at http://0.0.0.0:5000")
+    print("=" * 50)
+    
+    # Run Flask (use 0.0.0.0 to allow external access)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
 
 if __name__ == "__main__":
     main()

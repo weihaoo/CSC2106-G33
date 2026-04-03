@@ -10,14 +10,14 @@
 // ============================================================================
 
 // CHANGE THIS BEFORE FLASHING: Sensor 1 = SENSOR-03, Sensor 2 = SENSOR-04
-#define NODE_NAME "SENSOR-03"
+#define NODE_NAME "SENSOR-04"
 #include "../shared/logging.h"
 
 // -----------------------------------------------------------------------------
 // NODE CONFIGURATION -- Change before flashing!
 // Must be defined BEFORE including mesh_common.h
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x03    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2
 
 // -----------------------------------------------------------------------------
 // SHARED HEADERS (mesh_radio.h provides init_pmu, init_radio, pin defs, ISR;
@@ -35,8 +35,8 @@
 // Set NTP_ENABLED to false to skip Wi-Fi entirely.
 // -----------------------------------------------------------------------------
 #define NTP_ENABLED     true
-#define WIFI_SSID       "YourSSID"      // <-- Replace with your Wi-Fi name
-#define WIFI_PASSWORD   "YourPassword"  // <-- Replace with your Wi-Fi password
+#define WIFI_SSID       "Benedict's S24"      // <-- Replace with your Wi-Fi name
+#define WIFI_PASSWORD   "123456789"  // <-- Replace with your Wi-Fi password
 
 // -----------------------------------------------------------------------------
 // TIMING PARAMETERS (node-specific; shared ones come from mesh_protocol.h)
