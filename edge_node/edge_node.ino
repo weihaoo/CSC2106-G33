@@ -27,6 +27,7 @@
 #include <XPowersLib.h>
 #include <RadioLib.h>
 #include "config.h"
+#include "edge_metrics.h"
 #include "../shared/mesh_protocol.h"
 #include "../shared/ntp_time.h"   // Wi-Fi + NTP sync for latency measurement
 
@@ -108,6 +109,27 @@ uint32_t boot_time = 0;
 uint32_t packets_received = 0;
 uint32_t packets_dropped = 0;
 uint32_t uplinks_sent = 0;
+
+SourceMetric source_metrics[MAX_METRIC_SOURCES];
+
+uint32_t metrics_window_start_ms = 0;
+uint32_t metrics_window_delivered = 0;
+uint32_t metrics_window_payload_bytes = 0;
+uint32_t metrics_window_onair_bytes = 0;
+
+uint32_t metrics_total_delivered = 0;
+uint32_t metrics_total_expected = 0;
+uint32_t metrics_total_lost = 0;
+
+uint32_t metrics_hop_samples = 0;
+uint32_t metrics_hop_sum = 0;
+uint8_t metrics_hop_min = 0;
+uint8_t metrics_hop_max = 0;
+
+uint32_t metrics_latency_samples = 0;
+int32_t metrics_latency_min_ms = 0;
+int32_t metrics_latency_max_ms = 0;
+int64_t metrics_latency_sum_ms = 0;
 
 // Whether edge NTP sync succeeded (used by edge_packets.h for latency display)
 bool edge_ntp_synced = false;
@@ -272,6 +294,7 @@ void setup()
     memset(dedup_table, 0, sizeof(dedup_table));
 
     boot_time = millis();
+    metrics_init();
     last_flush_time = millis();
     last_beacon_time = millis() - BEACON_INTERVAL_MS + BEACON_PHASE_OFFSET;
 
@@ -296,6 +319,7 @@ void loop()
 
         receive_mesh_packets();
         broadcast_beacon_if_due();
+        metrics_report_if_due();
 
         // Check if we need to flush to LoRaWAN
         bool timeout_flush = (now - last_flush_time >= AGG_FLUSH_TIMEOUT_MS);

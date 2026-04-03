@@ -281,6 +281,9 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
     // Capture edge receive timestamp as early as possible for best accuracy
     uint32_t recv_time_s = get_ntp_epoch_s();
 
+    // Metrics are computed only for valid DATA packets that reached the edge.
+    metrics_record_delivery(hdr->src_id, hdr->seq_num, hop_count, hdr->payload_len);
+
     Serial.println(F("────────────────────────────────────────────────────"));
     Serial.print(F("RX_MESH | src=0x"));
     Serial.print(hdr->src_id, HEX);
@@ -324,6 +327,7 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
             if (latency_ms >= 0 && latency_ms < 60000) {
                 Serial.print(latency_ms);
                 Serial.println(F(" ms"));
+                metrics_record_latency(latency_ms);
             } else {
                 // Negative or unreasonably large = clock skew, show raw delta
                 Serial.print((int32_t)(recv_time_s - send_ts));

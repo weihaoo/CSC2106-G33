@@ -99,6 +99,9 @@
 
 #define LORAWAN_FPORT       1           // TTN uplink port
 
+// Periodic serial report interval for latency/throughput/PDR/loss/hop metrics.
+#define METRICS_REPORT_INTERVAL_MS  15000UL
+
 // ════════════════════════════════════════════════════════════════════════════
 // BEACON PHASE OFFSET (prevents all nodes from beaconing simultaneously)
 // ════════════════════════════════════════════════════════════════════════════
