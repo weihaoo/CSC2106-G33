@@ -13,7 +13,7 @@
 #include <RadioLib.h>
 
 // Firmware version — printed at boot so teammates can verify all boards match
-#define FIRMWARE_VERSION "v1.5"
+#define FIRMWARE_VERSION "v1.6"
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORA RADIO PARAMETERS (AS923, Singapore — all nodes must match exactly)
