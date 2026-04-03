@@ -297,6 +297,8 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
     // Only shown when both edge and sensor had valid NTP sync at TX/RX time.
     // ──────────────────────────────────────────────────────────────────
 
+    uint16_t computed_latency_ms = 0;  // Store for aggregation (0 = no NTP sync)
+
     if (edge_ntp_synced && hdr->payload_len >= 11) {
         // Decode send_timestamp_s (big-endian uint32 at payload bytes 7-10)
         uint32_t send_ts = ((uint32_t)payload[7] << 24)
@@ -313,6 +315,11 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
             //   (recv whole-seconds - send whole-seconds) * 1000 + recv fractional ms
             int32_t latency_ms = (int32_t)(recv_time_s - send_ts) * 1000
                                + (int32_t)edge_recv_ms_within_sec;
+
+            // Store for aggregation (clamp to uint16 range: 0-65535 ms)
+            if (latency_ms >= 0 && latency_ms < 65535) {
+                computed_latency_ms = (uint16_t)latency_ms;
+            }
 
             Serial.print(F("LATENCY | src=0x"));
             Serial.print(hdr->src_id, HEX);
@@ -360,6 +367,7 @@ inline void handle_data(MeshHeader *hdr, uint8_t *payload, int rssi, float snr)
         rec->mesh_seq = hdr->seq_num;
         rec->hop_estimate = hop_count;
         rec->edge_uptime_s = (millis() - boot_time) / 1000;
+        rec->latency_ms = computed_latency_ms;  // Store computed latency
         rec->opaque_len = copy_len;
         memcpy(rec->opaque_payload, payload, copy_len);
         rec->valid = true;

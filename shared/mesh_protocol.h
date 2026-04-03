@@ -205,11 +205,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  sensor_type_hint;
     uint8_t  hop_estimate;
     uint16_t edge_uptime_s;
+    uint16_t latency_ms;       // One-way latency in ms (0 = no NTP sync)
     uint8_t  opaque_len;
     uint8_t  opaque_payload[7];
 } BridgeRecord;
 
-#define BRIDGE_RECORD_SIZE   14
+#define BRIDGE_RECORD_SIZE   16  // Was 14, now 16 with latency_ms
 #define BRIDGE_AGG_SCHEMA_V1 0x02
 
 // ════════════════════════════════════════════════════════════════════════════

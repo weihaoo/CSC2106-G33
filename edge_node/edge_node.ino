@@ -83,6 +83,7 @@ struct AggRecord
     uint8_t mesh_seq;
     uint8_t hop_estimate;
     uint16_t edge_uptime_s;
+    uint16_t latency_ms;                   // One-way latency in ms (0 = no NTP sync)
     uint8_t opaque_len;                    // Actual payload length from mesh header
     uint8_t opaque_payload[MAX_OPAQUE_PAYLOAD]; // Raw payload bytes (sensor-agnostic)
     bool valid;

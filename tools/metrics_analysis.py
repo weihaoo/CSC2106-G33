@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""
+LoRa Mesh Metrics Analysis Script
+CSC2106 Group 33
+
+Parses serial logs from edge node and generates metrics graphs for the report.
+Supports both captured logs (via serial_capture.py) and copy-pasted text.
+
+Usage:
+    python metrics_analysis.py logs/test_run.log --output report/
+    python metrics_analysis.py logs/*.log --compare --output comparison/
+
+Dependencies:
+    pip install matplotlib pandas
+
+Output:
+    - summary.csv: Table of all metrics
+    - latency_histogram.png: Latency distribution
+    - latency_timeline.png: Latency over time
+    - pdr_by_node.png: Per-node PDR bar chart
+    - hop_distribution.png: Hop count histogram
+    - throughput_timeline.png: Throughput over time
+    - packet_loss_cumulative.png: Cumulative packet loss
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
+
+try:
+    import matplotlib.pyplot as plt
+    import pandas as pd
+except ImportError:
+    print("ERROR: Missing dependencies. Run: pip install matplotlib pandas")
+    sys.exit(1)
+
+
+# ── Regex patterns for parsing serial logs ──
+PATTERNS = {
+    # RX_MESH | src=0x03 | seq=42 | hops=2 | rssi=-85
+    'rx_mesh': re.compile(
+        r'RX_MESH\s*\|\s*src=0x([0-9A-Fa-f]+)\s*\|\s*seq=(\d+)\s*\|\s*hops=(\d+)\s*\|\s*rssi=(-?\d+)'
+    ),
+    # LATENCY | src=0x03 | send_ts=... | recv_ts=... | one-way ~123 ms
+    'latency': re.compile(
+        r'LATENCY\s*\|\s*src=0x([0-9A-Fa-f]+).*one-way\s*~?\s*(\d+)\s*ms'
+    ),
+    # [DROP] ... src=0x03 seq=42
+    'drop': re.compile(
+        r'\[DROP\].*src=0x([0-9A-Fa-f]+).*seq=(\d+)'
+    ),
+    # Timestamp at start of line: [HH:MM:SS.mmm]
+    'timestamp': re.compile(
+        r'^\[(\d{2}:\d{2}:\d{2}\.\d{3})\]'
+    )
+}
+
+
+class MetricsParser:
+    """Parses serial log files and extracts metrics."""
+    
+    def __init__(self):
+        self.packets = []  # List of {timestamp, src_id, seq, hops, rssi, latency_ms}
+        self.drops = []    # List of {timestamp, src_id, seq}
+        
+    def parse_file(self, filepath):
+        """Parse a log file and extract metrics."""
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        
+        current_packet = {}
+        line_num = 0
+        
+        for line in lines:
+            line_num += 1
+            
+            # Skip comment lines
+            if line.strip().startswith('#'):
+                continue
+            
+            # Try to extract timestamp
+            ts_match = PATTERNS['timestamp'].match(line)
+            timestamp = ts_match.group(1) if ts_match else None
+            
+            # Check for RX_MESH line
+            rx_match = PATTERNS['rx_mesh'].search(line)
+            if rx_match:
+                current_packet = {
+                    'timestamp': timestamp,
+                    'line_num': line_num,
+                    'src_id': rx_match.group(1).upper(),
+                    'seq': int(rx_match.group(2)),
+                    'hops': int(rx_match.group(3)),
+                    'rssi': int(rx_match.group(4)),
+                    'latency_ms': None
+                }
+                continue
+            
+            # Check for LATENCY line (follows RX_MESH)
+            lat_match = PATTERNS['latency'].search(line)
+            if lat_match and current_packet:
+                src_id = lat_match.group(1).upper()
+                if current_packet.get('src_id') == src_id:
+                    current_packet['latency_ms'] = int(lat_match.group(2))
+                    self.packets.append(current_packet.copy())
+                    current_packet = {}
+                continue
+            
+            # Check for DROP line
+            drop_match = PATTERNS['drop'].search(line)
+            if drop_match:
+                self.drops.append({
+                    'timestamp': timestamp,
+                    'line_num': line_num,
+                    'src_id': drop_match.group(1).upper(),
+                    'seq': int(drop_match.group(2))
+                })
+                continue
+            
+            # If we have a packet without latency, save it anyway
+            if current_packet and current_packet.get('src_id'):
+                # Check if this line has no metrics data
+                if not any(p.search(line) for p in PATTERNS.values()):
+                    self.packets.append(current_packet.copy())
+                    current_packet = {}
+        
+        # Don't forget last packet
+        if current_packet and current_packet.get('src_id'):
+            self.packets.append(current_packet)
+        
+        print(f"Parsed {filepath}: {len(self.packets)} packets, {len(self.drops)} drops")
+    
+    def get_dataframe(self):
+        """Return packets as a pandas DataFrame."""
+        return pd.DataFrame(self.packets)
+    
+    def get_stats(self):
+        """Calculate summary statistics."""
+        df = self.get_dataframe()
+        if df.empty:
+            return {}
+        
+        stats = {
+            'total_packets': len(df),
+            'total_drops': len(self.drops),
+            'unique_nodes': df['src_id'].nunique(),
+            'nodes': list(df['src_id'].unique())
+        }
+        
+        # Latency stats
+        latencies = df['latency_ms'].dropna()
+        if not latencies.empty:
+            stats['latency_min'] = latencies.min()
+            stats['latency_max'] = latencies.max()
+            stats['latency_mean'] = latencies.mean()
+            stats['latency_median'] = latencies.median()
+            stats['latency_std'] = latencies.std()
+        
+        # Hop stats
+        hops = df['hops']
+        if not hops.empty:
+            stats['hops_min'] = hops.min()
+            stats['hops_max'] = hops.max()
+            stats['hops_mean'] = hops.mean()
+        
+        # PDR calculation (requires sequence analysis)
+        pdr_by_node = {}
+        for src_id in df['src_id'].unique():
+            node_df = df[df['src_id'] == src_id].sort_values('seq')
+            if len(node_df) < 2:
+                pdr_by_node[src_id] = 100.0
+                continue
+            
+            seqs = node_df['seq'].tolist()
+            expected = 0
+            for i in range(1, len(seqs)):
+                gap = (seqs[i] - seqs[i-1]) % 256
+                if gap > 1:
+                    expected += gap - 1
+            
+            received = len(seqs)
+            total = received + expected
+            pdr_by_node[src_id] = (received / total) * 100 if total > 0 else 100.0
+        
+        stats['pdr_by_node'] = pdr_by_node
+        stats['pdr_overall'] = sum(pdr_by_node.values()) / len(pdr_by_node) if pdr_by_node else 100.0
+        
+        return stats
+
+
+class MetricsPlotter:
+    """Generates graphs from parsed metrics."""
+    
+    def __init__(self, parser: MetricsParser, output_dir: Path):
+        self.parser = parser
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Set style
+        plt.style.use('seaborn-v0_8-darkgrid')
+        plt.rcParams['figure.figsize'] = (10, 6)
+        plt.rcParams['font.size'] = 12
+    
+    def plot_all(self):
+        """Generate all 6 graphs."""
+        df = self.parser.get_dataframe()
+        if df.empty:
+            print("No data to plot!")
+            return
+        
+        self.plot_latency_histogram(df)
+        self.plot_latency_timeline(df)
+        self.plot_pdr_by_node()
+        self.plot_hop_distribution(df)
+        self.plot_throughput_timeline(df)
+        self.plot_packet_loss_cumulative(df)
+        self.export_csv(df)
+    
+    def plot_latency_histogram(self, df):
+        """Graph 1: Latency distribution histogram."""
+        latencies = df['latency_ms'].dropna()
+        if latencies.empty:
+            print("No latency data for histogram")
+            return
+        
+        fig, ax = plt.subplots()
+        ax.hist(latencies, bins=30, color='#60a5fa', edgecolor='#1e3a5f', alpha=0.8)
+        ax.axvline(latencies.mean(), color='#ef4444', linestyle='--', linewidth=2, label=f'Mean: {latencies.mean():.0f} ms')
+        ax.axvline(latencies.median(), color='#22c55e', linestyle='--', linewidth=2, label=f'Median: {latencies.median():.0f} ms')
+        
+        ax.set_xlabel('Latency (ms)')
+        ax.set_ylabel('Frequency')
+        ax.set_title('LoRa Mesh Latency Distribution')
+        ax.legend()
+        
+        fig.savefig(self.output_dir / 'latency_histogram.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'latency_histogram.png'}")
+    
+    def plot_latency_timeline(self, df):
+        """Graph 2: Latency over time (by packet index)."""
+        latencies = df['latency_ms'].dropna()
+        if latencies.empty:
+            return
+        
+        fig, ax = plt.subplots()
+        ax.plot(range(len(latencies)), latencies, color='#60a5fa', linewidth=1, alpha=0.8)
+        ax.axhline(latencies.mean(), color='#ef4444', linestyle='--', linewidth=1, label=f'Mean: {latencies.mean():.0f} ms')
+        
+        ax.set_xlabel('Packet Index')
+        ax.set_ylabel('Latency (ms)')
+        ax.set_title('LoRa Mesh Latency Over Time')
+        ax.legend()
+        
+        fig.savefig(self.output_dir / 'latency_timeline.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'latency_timeline.png'}")
+    
+    def plot_pdr_by_node(self):
+        """Graph 3: Per-node PDR bar chart."""
+        stats = self.parser.get_stats()
+        pdr_data = stats.get('pdr_by_node', {})
+        
+        if not pdr_data:
+            return
+        
+        fig, ax = plt.subplots()
+        nodes = list(pdr_data.keys())
+        pdrs = list(pdr_data.values())
+        colors = ['#22c55e' if p >= 95 else ('#eab308' if p >= 80 else '#ef4444') for p in pdrs]
+        
+        bars = ax.bar(nodes, pdrs, color=colors, edgecolor='#1e3a5f')
+        
+        ax.set_xlabel('Node ID')
+        ax.set_ylabel('PDR (%)')
+        ax.set_title('Packet Delivery Ratio by Node')
+        ax.set_ylim(0, 105)
+        
+        # Add value labels
+        for bar, pdr in zip(bars, pdrs):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
+                   f'{pdr:.1f}%', ha='center', va='bottom', fontsize=10)
+        
+        fig.savefig(self.output_dir / 'pdr_by_node.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'pdr_by_node.png'}")
+    
+    def plot_hop_distribution(self, df):
+        """Graph 4: Hop count histogram."""
+        hops = df['hops']
+        if hops.empty:
+            return
+        
+        fig, ax = plt.subplots()
+        hop_counts = hops.value_counts().sort_index()
+        ax.bar(hop_counts.index, hop_counts.values, color='#a855f7', edgecolor='#581c87')
+        
+        ax.set_xlabel('Hop Count')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Hop Count Distribution')
+        ax.set_xticks(range(int(hops.min()), int(hops.max()) + 1))
+        
+        fig.savefig(self.output_dir / 'hop_distribution.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'hop_distribution.png'}")
+    
+    def plot_throughput_timeline(self, df):
+        """Graph 5: Throughput over time (rolling window)."""
+        if len(df) < 5:
+            return
+        
+        # Estimate bytes per packet (header + payload)
+        bytes_per_packet = 25  # ~10 byte header + ~15 byte payload
+        
+        # Use packet index as time proxy (5s interval assumed)
+        window_size = 6  # ~30s window at 5s intervals
+        
+        throughput = []
+        for i in range(len(df)):
+            start = max(0, i - window_size + 1)
+            packets_in_window = i - start + 1
+            # Bytes per second (assuming 5s between packets)
+            bps = (packets_in_window * bytes_per_packet) / (packets_in_window * 5)
+            throughput.append(bps)
+        
+        fig, ax = plt.subplots()
+        ax.plot(range(len(throughput)), throughput, color='#22c55e', linewidth=2)
+        ax.fill_between(range(len(throughput)), throughput, alpha=0.3, color='#22c55e')
+        
+        ax.set_xlabel('Packet Index')
+        ax.set_ylabel('Throughput (B/s)')
+        ax.set_title('Estimated Throughput Over Time (30s Rolling Window)')
+        
+        fig.savefig(self.output_dir / 'throughput_timeline.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'throughput_timeline.png'}")
+    
+    def plot_packet_loss_cumulative(self, df):
+        """Graph 6: Cumulative packet loss over time."""
+        # Calculate cumulative lost packets based on sequence gaps
+        cumulative_loss = []
+        loss_total = 0
+        
+        for src_id in df['src_id'].unique():
+            node_df = df[df['src_id'] == src_id].sort_values('line_num')
+            prev_seq = None
+            
+            for _, row in node_df.iterrows():
+                if prev_seq is not None:
+                    gap = (row['seq'] - prev_seq) % 256
+                    if gap > 1 and gap < 50:  # Reasonable gap
+                        loss_total += gap - 1
+                
+                cumulative_loss.append(loss_total)
+                prev_seq = row['seq']
+        
+        if not cumulative_loss:
+            return
+        
+        fig, ax = plt.subplots()
+        ax.plot(range(len(cumulative_loss)), cumulative_loss, color='#ef4444', linewidth=2)
+        ax.fill_between(range(len(cumulative_loss)), cumulative_loss, alpha=0.3, color='#ef4444')
+        
+        ax.set_xlabel('Packet Index')
+        ax.set_ylabel('Cumulative Packets Lost')
+        ax.set_title('Cumulative Packet Loss Over Test Duration')
+        
+        fig.savefig(self.output_dir / 'packet_loss_cumulative.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'packet_loss_cumulative.png'}")
+    
+    def export_csv(self, df):
+        """Export summary statistics to CSV."""
+        stats = self.parser.get_stats()
+        
+        # Create summary DataFrame
+        summary = {
+            'Metric': ['Total Packets', 'Total Drops', 'Unique Nodes', 'Overall PDR (%)'],
+            'Value': [
+                stats.get('total_packets', 0),
+                stats.get('total_drops', 0),
+                stats.get('unique_nodes', 0),
+                f"{stats.get('pdr_overall', 100):.1f}"
+            ]
+        }
+        
+        # Add latency stats
+        if 'latency_mean' in stats:
+            summary['Metric'].extend(['Latency Min (ms)', 'Latency Max (ms)', 'Latency Mean (ms)', 'Latency Median (ms)', 'Latency Std Dev'])
+            summary['Value'].extend([
+                f"{stats['latency_min']:.0f}",
+                f"{stats['latency_max']:.0f}",
+                f"{stats['latency_mean']:.1f}",
+                f"{stats['latency_median']:.1f}",
+                f"{stats['latency_std']:.1f}"
+            ])
+        
+        # Add hop stats
+        if 'hops_mean' in stats:
+            summary['Metric'].extend(['Hops Min', 'Hops Max', 'Hops Mean'])
+            summary['Value'].extend([
+                stats['hops_min'],
+                stats['hops_max'],
+                f"{stats['hops_mean']:.1f}"
+            ])
+        
+        summary_df = pd.DataFrame(summary)
+        summary_df.to_csv(self.output_dir / 'summary.csv', index=False)
+        print(f"Saved: {self.output_dir / 'summary.csv'}")
+        
+        # Also save raw packet data
+        df.to_csv(self.output_dir / 'packets.csv', index=False)
+        print(f"Saved: {self.output_dir / 'packets.csv'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Analyze LoRa mesh serial logs and generate metrics graphs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python metrics_analysis.py logs/test_run.log --output report/
+    python metrics_analysis.py logs/*.log --compare --output comparison/
+        """
+    )
+    parser.add_argument('files', nargs='+', help='Log file(s) to analyze')
+    parser.add_argument('--output', '-o', default='report/', help='Output directory (default: report/)')
+    parser.add_argument('--compare', action='store_true', help='Compare multiple log files')
+    
+    args = parser.parse_args()
+    
+    output_dir = Path(args.output)
+    
+    if args.compare and len(args.files) > 1:
+        # Multi-file comparison mode
+        print(f"Comparing {len(args.files)} log files...")
+        # TODO: Implement comparison mode
+        print("Comparison mode not yet implemented. Analyzing first file only.")
+        args.files = [args.files[0]]
+    
+    # Parse all files
+    metrics_parser = MetricsParser()
+    for filepath in args.files:
+        path = Path(filepath)
+        if path.exists():
+            metrics_parser.parse_file(path)
+        else:
+            print(f"Warning: File not found: {filepath}")
+    
+    if not metrics_parser.packets:
+        print("No packets found in log files!")
+        sys.exit(1)
+    
+    # Print summary stats
+    stats = metrics_parser.get_stats()
+    print("\n" + "=" * 50)
+    print("SUMMARY STATISTICS")
+    print("=" * 50)
+    print(f"Total packets: {stats.get('total_packets', 0)}")
+    print(f"Total drops: {stats.get('total_drops', 0)}")
+    print(f"Unique nodes: {stats.get('unique_nodes', 0)} ({', '.join(stats.get('nodes', []))})")
+    print(f"Overall PDR: {stats.get('pdr_overall', 100):.1f}%")
+    
+    if 'latency_mean' in stats:
+        print(f"\nLatency:")
+        print(f"  Min: {stats['latency_min']:.0f} ms")
+        print(f"  Max: {stats['latency_max']:.0f} ms")
+        print(f"  Mean: {stats['latency_mean']:.1f} ms")
+        print(f"  Median: {stats['latency_median']:.1f} ms")
+    
+    print("=" * 50 + "\n")
+    
+    # Generate plots
+    plotter = MetricsPlotter(metrics_parser, output_dir)
+    plotter.plot_all()
+    
+    print(f"\nAll outputs saved to: {output_dir.absolute()}")
+
+
+if __name__ == '__main__':
+    main()

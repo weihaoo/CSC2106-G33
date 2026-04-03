@@ -53,7 +53,7 @@ inline void send_lorawan_uplink()
     uplink_buf[idx++] = NODE_ID;              // bridge_id
     uplink_buf[idx++] = agg_count;            // record_count
 
-    // Records (14 bytes each)
+    // Records (16 bytes each — includes latency_ms field)
     for (uint8_t i = 0; i < agg_count; i++)
     {
         if (!agg_buffer[i].valid)
@@ -66,6 +66,8 @@ inline void send_lorawan_uplink()
         uplink_buf[idx++] = rec->hop_estimate;
         uplink_buf[idx++] = (rec->edge_uptime_s >> 8) & 0xFF; // High byte
         uplink_buf[idx++] = rec->edge_uptime_s & 0xFF;        // Low byte
+        uplink_buf[idx++] = (rec->latency_ms >> 8) & 0xFF;    // Latency high byte
+        uplink_buf[idx++] = rec->latency_ms & 0xFF;           // Latency low byte
         uplink_buf[idx++] = rec->opaque_len;                   // actual payload length
         memcpy(&uplink_buf[idx], rec->opaque_payload, rec->opaque_len);
         idx += rec->opaque_len;
