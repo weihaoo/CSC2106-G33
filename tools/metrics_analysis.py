@@ -204,8 +204,24 @@ class MetricsPlotter:
         plt.rcParams['figure.figsize'] = (10, 6)
         plt.rcParams['font.size'] = 12
     
+    @staticmethod
+    def timestamp_to_seconds(ts_str):
+        """Convert HH:MM:SS.mmm timestamp to seconds since midnight."""
+        if not ts_str:
+            return None
+        try:
+            parts = ts_str.split(':')
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            sec_parts = parts[2].split('.')
+            seconds = int(sec_parts[0])
+            millis = int(sec_parts[1]) if len(sec_parts) > 1 else 0
+            return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+        except:
+            return None
+    
     def plot_all(self):
-        """Generate all 6 graphs."""
+        """Generate all graphs."""
         df = self.parser.get_dataframe()
         if df.empty:
             print("No data to plot!")
@@ -216,7 +232,8 @@ class MetricsPlotter:
         self.plot_pdr_by_node()
         self.plot_hop_distribution(df)
         self.plot_throughput_timeline(df)
-        self.plot_packet_loss_cumulative(df)
+        self.plot_packet_loss_by_time(df)
+        self.plot_packet_loss_by_index(df)
         self.export_csv(df)
     
     def plot_latency_histogram(self, df):
@@ -308,65 +325,163 @@ class MetricsPlotter:
         print(f"Saved: {self.output_dir / 'hop_distribution.png'}")
     
     def plot_throughput_timeline(self, df):
-        """Graph 5: Throughput over time (rolling window)."""
+        """Graph 5: Throughput over time using actual timestamps."""
         if len(df) < 5:
             return
         
-        # Estimate bytes per packet (header + payload)
+        # Convert timestamps to seconds
+        df = df.copy()
+        df['time_s'] = df['timestamp'].apply(self.timestamp_to_seconds)
+        df = df.dropna(subset=['time_s'])
+        
+        if len(df) < 5:
+            print("Not enough timestamped packets for throughput graph")
+            return
+        
+        # Normalize to start at 0
+        start_time = df['time_s'].min()
+        df['elapsed_s'] = df['time_s'] - start_time
+        
+        # Estimate bytes per packet (LoRa mesh packet size)
         bytes_per_packet = 25  # ~10 byte header + ~15 byte payload
         
-        # Use packet index as time proxy (5s interval assumed)
-        window_size = 6  # ~30s window at 5s intervals
+        # Rolling window in seconds
+        window_s = 30.0
         
+        elapsed_times = df['elapsed_s'].tolist()
         throughput = []
-        for i in range(len(df)):
-            start = max(0, i - window_size + 1)
-            packets_in_window = i - start + 1
-            # Bytes per second (assuming 5s between packets)
-            bps = (packets_in_window * bytes_per_packet) / (packets_in_window * 5)
+        time_axis = []
+        
+        for i, t in enumerate(elapsed_times):
+            # Count packets in the window [t - window_s, t]
+            window_start = max(0, t - window_s)
+            packets_in_window = sum(1 for et in elapsed_times[:i+1] if et >= window_start)
+            
+            # Calculate actual window duration
+            times_in_window = [et for et in elapsed_times[:i+1] if et >= window_start]
+            if len(times_in_window) >= 2:
+                actual_window = times_in_window[-1] - times_in_window[0]
+                if actual_window > 0:
+                    bps = (packets_in_window * bytes_per_packet) / actual_window
+                else:
+                    bps = 0
+            else:
+                bps = 0
+            
             throughput.append(bps)
+            time_axis.append(t)
         
         fig, ax = plt.subplots()
-        ax.plot(range(len(throughput)), throughput, color='#22c55e', linewidth=2)
-        ax.fill_between(range(len(throughput)), throughput, alpha=0.3, color='#22c55e')
+        ax.plot(time_axis, throughput, color='#22c55e', linewidth=2)
+        ax.fill_between(time_axis, throughput, alpha=0.3, color='#22c55e')
         
-        ax.set_xlabel('Packet Index')
+        ax.set_xlabel('Elapsed Time (seconds)')
         ax.set_ylabel('Throughput (B/s)')
-        ax.set_title('Estimated Throughput Over Time (30s Rolling Window)')
+        ax.set_title('Throughput Over Time (30s Rolling Window)')
+        
+        # Add average line
+        avg_throughput = sum(throughput) / len(throughput) if throughput else 0
+        ax.axhline(avg_throughput, color='#ef4444', linestyle='--', linewidth=1.5, 
+                   label=f'Avg: {avg_throughput:.1f} B/s')
+        ax.legend()
         
         fig.savefig(self.output_dir / 'throughput_timeline.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
         print(f"Saved: {self.output_dir / 'throughput_timeline.png'}")
     
-    def plot_packet_loss_cumulative(self, df):
-        """Graph 6: Cumulative packet loss over time."""
-        # Calculate cumulative lost packets based on sequence gaps
+    def plot_packet_loss_by_time(self, df):
+        """Graph 6a: Cumulative packet loss over elapsed time."""
+        df = df.copy()
+        df['time_s'] = df['timestamp'].apply(self.timestamp_to_seconds)
+        df = df.dropna(subset=['time_s'])
+        
+        if len(df) < 2:
+            return
+        
+        # Sort by timestamp (chronological order across all nodes)
+        df = df.sort_values('time_s').reset_index(drop=True)
+        start_time = df['time_s'].min()
+        df['elapsed_s'] = df['time_s'] - start_time
+        
+        # Track per-node sequence numbers
+        last_seq = {}
+        cumulative_loss = []
+        elapsed_times = []
+        loss_total = 0
+        
+        for _, row in df.iterrows():
+            src_id = row['src_id']
+            seq = row['seq']
+            
+            if src_id in last_seq:
+                gap = (seq - last_seq[src_id]) % 256
+                if gap > 1 and gap < 50:  # Reasonable gap
+                    loss_total += gap - 1
+            
+            last_seq[src_id] = seq
+            cumulative_loss.append(loss_total)
+            elapsed_times.append(row['elapsed_s'])
+        
+        fig, ax = plt.subplots()
+        ax.step(elapsed_times, cumulative_loss, where='post', color='#ef4444', linewidth=2)
+        ax.fill_between(elapsed_times, cumulative_loss, step='post', alpha=0.3, color='#ef4444')
+        
+        ax.set_xlabel('Elapsed Time (seconds)')
+        ax.set_ylabel('Cumulative Packets Lost')
+        ax.set_title('Cumulative Packet Loss Over Time')
+        
+        # Add final count annotation
+        if cumulative_loss:
+            ax.annotate(f'Total: {cumulative_loss[-1]}', 
+                       xy=(elapsed_times[-1], cumulative_loss[-1]),
+                       xytext=(5, 5), textcoords='offset points',
+                       fontsize=10, color='#ef4444')
+        
+        fig.savefig(self.output_dir / 'packet_loss_by_time.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'packet_loss_by_time.png'}")
+    
+    def plot_packet_loss_by_index(self, df):
+        """Graph 6b: Cumulative packet loss by packet reception order."""
+        df = df.copy()
+        
+        # Sort by line_num (reception order)
+        df = df.sort_values('line_num').reset_index(drop=True)
+        
+        # Track per-node sequence numbers
+        last_seq = {}
         cumulative_loss = []
         loss_total = 0
         
-        for src_id in df['src_id'].unique():
-            node_df = df[df['src_id'] == src_id].sort_values('line_num')
-            prev_seq = None
+        for _, row in df.iterrows():
+            src_id = row['src_id']
+            seq = row['seq']
             
-            for _, row in node_df.iterrows():
-                if prev_seq is not None:
-                    gap = (row['seq'] - prev_seq) % 256
-                    if gap > 1 and gap < 50:  # Reasonable gap
-                        loss_total += gap - 1
-                
-                cumulative_loss.append(loss_total)
-                prev_seq = row['seq']
+            if src_id in last_seq:
+                gap = (seq - last_seq[src_id]) % 256
+                if gap > 1 and gap < 50:  # Reasonable gap
+                    loss_total += gap - 1
+            
+            last_seq[src_id] = seq
+            cumulative_loss.append(loss_total)
         
         if not cumulative_loss:
             return
         
         fig, ax = plt.subplots()
-        ax.plot(range(len(cumulative_loss)), cumulative_loss, color='#ef4444', linewidth=2)
-        ax.fill_between(range(len(cumulative_loss)), cumulative_loss, alpha=0.3, color='#ef4444')
+        ax.step(range(len(cumulative_loss)), cumulative_loss, where='post', color='#ef4444', linewidth=2)
+        ax.fill_between(range(len(cumulative_loss)), cumulative_loss, step='post', alpha=0.3, color='#ef4444')
         
-        ax.set_xlabel('Packet Index')
+        ax.set_xlabel('Packet Index (Reception Order)')
         ax.set_ylabel('Cumulative Packets Lost')
-        ax.set_title('Cumulative Packet Loss Over Test Duration')
+        ax.set_title('Cumulative Packet Loss by Reception Order')
+        
+        # Add final count annotation
+        if cumulative_loss:
+            ax.annotate(f'Total: {cumulative_loss[-1]}', 
+                       xy=(len(cumulative_loss)-1, cumulative_loss[-1]),
+                       xytext=(5, 5), textcoords='offset points',
+                       fontsize=10, color='#ef4444')
         
         fig.savefig(self.output_dir / 'packet_loss_cumulative.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
