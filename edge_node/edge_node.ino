@@ -20,7 +20,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 // CHANGE THIS BEFORE FLASHING: EDGE-01 for Node 0x01, EDGE-06 for Node 0x06
-#define NODE_NAME "EDGE-06"
+#define NODE_NAME "EDGE-01"
 #include "../shared/logging.h"
 
 #include <Wire.h>
@@ -38,7 +38,7 @@ XPowersAXP2101 PMU;
 SX1262 radio = new Module(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 
 // Uncomment the next line to enable LoRaWAN join + uplink (requires real TTN credentials in config.h)
-// #define ENABLE_LORAWAN  // Disabled for mesh-only testing (re-enable for TTN uplink)
+#define ENABLE_LORAWAN  // Disabled for mesh-only testing (re-enable for TTN uplink)
 
 #ifdef ENABLE_LORAWAN
 LoRaWANNode lorawan_node(&radio, &AS923); // AS923 for Singapore

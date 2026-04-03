@@ -12,7 +12,7 @@
 
 // For Edge 1 (primary): use 0x01
 // For Edge 2 (standby): use 0x06
-#define NODE_ID 0x06
+#define NODE_ID 0x01
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORAWAN OTAA CREDENTIALS (from Person 4 / TTN Console)
@@ -89,8 +89,8 @@
 #define NTP_ENABLED         true
 
 // CHANGE THESE to your demo Wi-Fi network credentials
-#define WIFI_SSID           "YourSSID"      // <-- Replace with your Wi-Fi name
-#define WIFI_PASSWORD       "YourPassword"  // <-- Replace with your Wi-Fi password
+#define WIFI_SSID           "MwiPhone"      // <-- Replace with your Wi-Fi name
+#define WIFI_PASSWORD       "mingwei111"  // <-- Replace with your Wi-Fi password
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORAWAN UPLINK PARAMETERS (edge-node specific)
