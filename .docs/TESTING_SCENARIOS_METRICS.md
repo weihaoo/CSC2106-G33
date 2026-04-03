@@ -27,6 +27,34 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 
 ---
 
+## Testing Priority Guide
+
+**Time Available**: 5-8 hours recommended for comprehensive testing
+
+### Scenario Priorities
+
+| Priority | Scenarios | Time Required | Reason |
+|----------|-----------|---------------|--------|
+| **[REQUIRED]** | 1, 2, 3, 6, 7 | ~4-5 hours | Core mesh functionality, stress testing, resilience |
+| **[OPTIONAL]** | 5 | ~30 min | Additional resilience data (requires firmware modification) |
+| **[SKIP]** | 4 | ~1.5 hours | Requires outdoor space (50-100m+ separation) |
+
+### Recommended Test Sequence
+
+Follow this order for optimal workflow (minimizes reflashing and setup changes):
+
+1. **Setup & Baseline** (30 min) - Scenario 1
+2. **Stress Testing** (30 min) - Scenario 2 (all sub-scenarios: 2a, 2b, 2c)
+3. **Full Load** (20 min) - Scenario 7
+4. **Multi-Hop Routing** (45 min) - Scenario 3 (both variations)
+5. **Resilience** (30 min) - Scenario 6
+6. **Optional: Burst** (30 min) - Scenario 5 (if time permits)
+7. **Analysis** (60 min) - Generate all reports and graphs
+
+**Total Core Testing**: ~4-5 hours (scenarios 1, 2, 3, 6, 7)
+
+---
+
 ## Pre-Test Checklist
 
 1. **Flash firmware** to all nodes (`sensor_node/`, `relay_node/`, `edge_node/`)
@@ -49,7 +77,12 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 
 ---
 
-## Scenario 1: Baseline (Normal Operation)
+## Scenario 1: Baseline (Normal Operation) [REQUIRED]
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_1.log
+    ```
 
 **Goal:** Establish baseline metrics under ideal conditions.
 
@@ -64,15 +97,21 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 - PDR: >95%
 - Hop count: 1 (direct)
 
-**Log file:** `logs/baseline_10min.log`
+**Log file:** `logs/scenario_1.log`
 
 ---
 
-## Scenario 2: TX Interval Stress Test
+## Scenario 2: TX Interval Stress Test [REQUIRED]
 
 **Goal:** Find throughput limits by reducing transmission interval.
 
 ### 2a: 2-second interval
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_2_2s.log
+    ```
+
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -80,9 +119,14 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 | 0x02 (Sensor) | Change `TX_INTERVAL_MS = 2000`, reflash | 5 min |
 | 0x05 (Edge) | Capture serial logs | 5 min |
 
-**Log file:** `logs/tx_2s.log`
+**Log file:** `logs/scenario_2_1s.log`
 
 ### 2b: 1-second interval
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_2_1s.log
+    ```
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -90,9 +134,15 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 | 0x02 (Sensor) | Change `TX_INTERVAL_MS = 1000`, reflash | 5 min |
 | 0x05 (Edge) | Capture serial logs | 5 min |
 
-**Log file:** `logs/tx_1s.log`
+**Log file:** `logs/scenario_2_1s.log`
 
 ### 2c: 500ms interval (stress)
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_2_500ms.log
+    ```
+
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -100,15 +150,27 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 | 0x02 (Sensor) | Change `TX_INTERVAL_MS = 500`, reflash | 3 min |
 | 0x05 (Edge) | Capture serial logs | 3 min |
 
-**Log file:** `logs/tx_500ms.log`
+**Log file:** `logs/scenario_2_500ms.log`
 
 **Expected:** PDR degrades, collisions increase, latency rises.
 
 ---
 
-## Scenario 3: Multi-Hop Chain
+## Scenario 3: Multi-Hop Chain [REQUIRED]
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_3.log
+    ```
 
 **Goal:** Measure latency and PDR increase with hop count.
+
+**Indoor Testing Adaptation:**
+If outdoor space is limited, you can force multi-hop routing indoors by:
+- Placing nodes in different rooms with walls between them
+- Using metal barriers or Faraday cages to attenuate signal
+- Reducing TX power in firmware (if supported)
+- Positioning nodes at maximum indoor distance (opposite ends of building)
 
 **Physical Setup:**
 ```
@@ -142,11 +204,18 @@ Place nodes in a line, far enough apart that direct links are weak/impossible.
 
 ---
 
-## Scenario 4: Distance/Signal Stress
+## Scenario 4: Distance/Signal Stress [SKIP - Outdoor Space Required]
+
+**Note:** This scenario requires 50-100m+ separation and is not feasible in limited indoor environments. Skip if testing space is constrained. Focus on Scenarios 1-3, 6-7 instead.
 
 **Goal:** Test performance at range limits.
 
 ### 4a: Near range (10m line-of-sight)
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_4a_10m.log
+    ```
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -155,12 +224,22 @@ Place nodes in a line, far enough apart that direct links are weak/impossible.
 
 ### 4b: Medium range (50m line-of-sight)
 
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_4b_50m.log
+    ```
+
 | Node | Action | Duration |
 |------|--------|----------|
 | 0x01 (Sensor) | 50m from Edge, clear LOS | 5 min |
 | 0x05 (Edge) | Capture logs, note RSSI | 5 min |
 
 ### 4c: Far range (100m+ or obstructed)
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_4c_100m.log
+    ```
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -173,7 +252,14 @@ Place nodes in a line, far enough apart that direct links are weak/impossible.
 
 ---
 
-## Scenario 5: Burst Traffic
+## Scenario 5: Burst Traffic [OPTIONAL - If Time Permits]
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_5_burst.log
+    ```
+
+**Note:** Requires firmware modification. Test only if you have extra time after completing Scenarios 1-3, 6-7.
 
 **Goal:** Test network response to sudden traffic spike.
 
@@ -203,7 +289,12 @@ void sendBurst(int count) {
 
 ---
 
-## Scenario 6: Node Failure/Recovery
+## Scenario 6: Node Failure/Recovery [REQUIRED]
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_6_failure.log
+    ```
 
 **Goal:** Test mesh resilience when nodes drop.
 
@@ -228,7 +319,12 @@ void sendBurst(int count) {
 
 ---
 
-## Scenario 7: All Nodes Active (Load Test)
+## Scenario 7: All Nodes Active (Load Test) [REQUIRED]
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_7_full_load.log
+    ```
 
 **Goal:** Maximum realistic load on the mesh.
 
