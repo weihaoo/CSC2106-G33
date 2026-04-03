@@ -2,27 +2,25 @@ import network, time, json
 import socket
 from umqtt.simple import MQTTClient
 
-# ── WiFi Configuration ──
+# WiFi Configuration
 WIFI_SSID = "premierlin"
 WIFI_PASS = "12345678"
 
-# ── TTN Configuration ──
-# For local testing, use the public test broker with no auth.
-# Change TTN_SERVER back to "as1.cloud.thethings.network" and fill in TTN_API_KEY
-# when connecting to real TTN.
-TTN_APP_ID  = "sit-csc2106-g33"
+# TTN Configuration
+TTN_APP_ID = "sit-csc2106-g33"
 TTN_API_KEY = "NNSXS.NRPKTDG3KGMLAO2KY37ZYTMJDKEN3CJMKZLCA7A.V7MH2LTQZSABZ6RZHOCQXSJBKZXLMK5U7BK7NBBLGED2DBNXRVFA"
-TTN_SERVER  = "au1.cloud.thethings.network"
+TTN_SERVER = "au1.cloud.thethings.network"
 
-# Wildcard '+' subscribes to ALL edge devices (edge-01, edge-06, etc.)
-TOPIC_TEST  = "csc2106-g33-dashboard-test/v3/sit-csc2106-g33@ttn/devices/+/up"
-TOPIC_TTN   = "v3/" + TTN_APP_ID + "@ttn/devices/+/up"
-TOPIC       = TOPIC_TTN if TTN_API_KEY else TOPIC_TEST
+# Wildcard '+' subscribes to all edge devices.
+TOPIC_TEST = "csc2106-g33-dashboard-test/v3/sit-csc2106-g33@ttn/devices/+/up"
+TOPIC_TTN = "v3/" + TTN_APP_ID + "@ttn/devices/+/up"
+TOPIC = TOPIC_TTN if TTN_API_KEY else TOPIC_TEST
 
-# ── State ──
-nodes = {}  # keyed by src_id string
+# State
+nodes = {}            # keyed by src_id string
+bridge_metrics = {}   # keyed by bridge_id string
 
-# ── WiFi Connection ──
+
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -37,33 +35,51 @@ def connect_wifi():
     if wlan.isconnected():
         print("\nWiFi connected:", wlan.ifconfig())
         return wlan.ifconfig()[0]
-    else:
-        print("\nWiFi connection failed.")
-        return None
+    print("\nWiFi connection failed.")
+    return None
 
-# ── MQTT Callback ──
+
 def on_message(topic, msg):
     try:
         payload = json.loads(msg)
         decoded = payload.get("uplink_message", {}).get("decoded_payload", {})
         readings = decoded.get("readings", [])
-        bridge_id = decoded.get("bridge_id", "?")
+        bridge_id = str(decoded.get("bridge_id", "?"))
+        metrics = decoded.get("metrics", {})
+
+        if metrics:
+            bridge_metrics[bridge_id] = {
+                "throughput_pps": metrics.get("throughput_pps", 0),
+                "throughput_bps": metrics.get("throughput_bps", 0),
+                "pdr_pct": metrics.get("pdr_pct", 0),
+                "loss_pct": metrics.get("loss_pct", 0),
+                "hop_avg": metrics.get("hop_avg", 0),
+                "latency_avg_ms": metrics.get("latency_avg_ms", 0),
+                "delivered_total": metrics.get("delivered_total", 0),
+                "expected_total": metrics.get("expected_total", 0),
+                "lost_total": metrics.get("lost_total", 0),
+                "window_ms": metrics.get("window_ms", 0),
+            }
+
         for r in readings:
             sid = str(r.get("src_id", "?"))
             nodes[sid] = {
-                "temp":   r.get("temperature_c", "?"),
-                "hum":    r.get("humidity_pct", "?"),
-                "hops":   r.get("hops", "?"),
-                "ok":     r.get("sensor_ok", False),
+                "temp": r.get("temperature_c", "?"),
+                "hum": r.get("humidity_pct", "?"),
+                "hops": r.get("hops", "?"),
+                "ok": r.get("sensor_ok", False),
                 "bridge": bridge_id,
             }
+
         print("Updated", len(readings), "readings from bridge", bridge_id)
     except Exception as e:
         print("MQTT parse error:", e)
 
-# ── Dashboard HTML ──
+
 def dashboard_html():
     rows = ""
+    metrics_rows = ""
+
     if not nodes:
         rows = "<tr><td colspan='6' style='padding:2rem;text-align:center;color:#94a3b8;font-style:italic'>No data yet. Waiting for TTN uplinks...</td></tr>"
     else:
@@ -76,7 +92,7 @@ def dashboard_html():
                 badge_style = "background:#dc2626;color:#ffffff;border:1px solid #b91c1c"
 
             temp_str = "{:.1f}".format(d["temp"]) if isinstance(d["temp"], (int, float)) else str(d["temp"])
-            hum_str  = "{:.1f}".format(d["hum"])  if isinstance(d["hum"],  (int, float)) else str(d["hum"])
+            hum_str = "{:.1f}".format(d["hum"]) if isinstance(d["hum"], (int, float)) else str(d["hum"])
 
             rows += (
                 "<tr>"
@@ -84,10 +100,12 @@ def dashboard_html():
                 + "0x{:02X}".format(int(sid))
                 + "</td>"
                 + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'><b>" + temp_str + "</b> &deg;C</td>"
-                + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'><b>" + hum_str  + "</b> %</td>"
+                + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'><b>" + hum_str + "</b> %</td>"
                 + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + str(d["hops"]) + "</td>"
                 + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'>"
-                + "<span style='background:#0c1a2e;color:#93c5fd;border:1px solid #1e40af;padding:3px 10px;border-radius:999px;font-size:0.75rem;font-weight:700'>Bridge " + str(d["bridge"]) + "</span>"
+                + "<span style='background:#0c1a2e;color:#93c5fd;border:1px solid #1e40af;padding:3px 10px;border-radius:999px;font-size:0.75rem;font-weight:700'>Bridge "
+                + str(d["bridge"])
+                + "</span>"
                 + "</td>"
                 + "<td style='padding:1rem 1.5rem;border-bottom:1px solid rgba(255,255,255,0.08)'>"
                 + "<span style='" + badge_style + ";padding:3px 10px;border-radius:999px;font-size:0.75rem;font-weight:700'>" + status_txt + "</span>"
@@ -95,7 +113,32 @@ def dashboard_html():
                 + "</tr>"
             )
 
-    # Compact, no external CSS. All styles are inline.
+    if not bridge_metrics:
+        metrics_rows = "<tr><td colspan='8' style='padding:1rem;text-align:center;color:#94a3b8;font-style:italic'>No metrics yet. Waiting for edge metric trailer...</td></tr>"
+    else:
+        for bid, m in sorted(bridge_metrics.items()):
+            pps = "{:.2f}".format(m["throughput_pps"]) if isinstance(m["throughput_pps"], (int, float)) else str(m["throughput_pps"])
+            bps = str(m["throughput_bps"])
+            pdr = "{:.2f}".format(m["pdr_pct"]) if isinstance(m["pdr_pct"], (int, float)) else str(m["pdr_pct"])
+            loss = "{:.2f}".format(m["loss_pct"]) if isinstance(m["loss_pct"], (int, float)) else str(m["loss_pct"])
+            hop_avg = "{:.2f}".format(m["hop_avg"]) if isinstance(m["hop_avg"], (int, float)) else str(m["hop_avg"])
+            lat = str(m["latency_avg_ms"])
+            totals = "{}/{}/{}".format(m["delivered_total"], m["expected_total"], m["lost_total"])
+            window = str(m["window_ms"])
+
+            metrics_rows += (
+                "<tr>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08);font-weight:700'>Bridge " + str(bid) + "</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + pps + "</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + bps + "</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + pdr + "%</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + loss + "%</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + hop_avg + "</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + lat + "</td>"
+                + "<td style='padding:0.75rem 1rem;border-bottom:1px solid rgba(255,255,255,0.08)'>" + totals + " (w=" + window + "ms)</td>"
+                + "</tr>"
+            )
+
     page = (
         "<!DOCTYPE html><html lang='en'><head>"
         "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -104,7 +147,7 @@ def dashboard_html():
         "</head>"
         "<body style='margin:0;padding:2rem 1rem;background:#0f172a;color:#f8fafc;"
         "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif'>"
-        "<div style='max-width:1000px;margin:0 auto'>"
+        "<div style='max-width:1100px;margin:0 auto'>"
         "<div style='display:flex;justify-content:space-between;align-items:center;"
         "border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:1rem;margin-bottom:2rem'>"
         "<div>"
@@ -125,11 +168,30 @@ def dashboard_html():
         "<th style='padding:0.75rem 1.5rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8;letter-spacing:0.05em'>Status</th>"
         "</tr></thead>"
         "<tbody>" + rows + "</tbody>"
-        "</table></div></div></body></html>"
+        "</table></div>"
+        "<div style='height:1rem'></div>"
+        "<div style='background:#1e293b;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,0.1)'>"
+        "<div style='padding:0.75rem 1rem;background:rgba(0,0,0,0.25);color:#94a3b8;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em'>"
+        "Network Metrics (Latency / Throughput / PDR / Loss / Hop Avg)"
+        "</div>"
+        "<table style='width:100%;border-collapse:collapse;text-align:left'>"
+        "<thead><tr style='background:rgba(0,0,0,0.18)'>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Bridge</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Throughput (pkt/s)</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Throughput (bps)</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>PDR</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Loss</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Hop Avg</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Latency Avg (ms)</th>"
+        "<th style='padding:0.6rem 1rem;font-size:0.7rem;text-transform:uppercase;color:#94a3b8'>Delivered/Expected/Lost</th>"
+        "</tr></thead>"
+        "<tbody>" + metrics_rows + "</tbody>"
+        "</table></div>"
+        "</div></body></html>"
     )
     return page
 
-# ── HTTP response sender (chunked for Pico W safety) ──
+
 def send_response(cl, html):
     cl.send(b"HTTP/1.1 200 OK\r\n")
     cl.send(b"Content-Type: text/html\r\n")
@@ -144,14 +206,14 @@ def send_response(cl, html):
             if n > 0:
                 sent += n
         except OSError as e:
-            if e.args[0] == 11:   # EAGAIN — buffer full, wait and retry
+            if e.args[0] == 11:
                 time.sleep(0.05)
             else:
                 print("Socket error:", e)
                 break
-    time.sleep(0.1)  # Flush before caller closes
+    time.sleep(0.1)
 
-# ── Main Entry ──
+
 def main():
     ip = connect_wifi()
     if not ip:
@@ -160,7 +222,6 @@ def main():
         import machine
         machine.reset()
 
-    # Connect to MQTT (no auth for test broker)
     if TTN_API_KEY:
         client = MQTTClient("picow-g33", TTN_SERVER,
                             user=TTN_APP_ID + "@ttn", password=TTN_API_KEY, port=1883)
@@ -180,7 +241,6 @@ def main():
         import machine
         machine.reset()
 
-    # HTTP server (non-blocking via settimeout)
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", 80))
@@ -191,7 +251,6 @@ def main():
     print("====================================")
 
     while True:
-        # Poll MQTT
         try:
             client.check_msg()
         except Exception as e:
@@ -202,20 +261,20 @@ def main():
             except Exception:
                 pass
 
-        # Serve HTTP
         try:
             cl, addr = server.accept()
-            cl.settimeout(5)  # prevent a slow client from blocking forever
+            cl.settimeout(5)
             print("HTTP from", addr)
             try:
-                cl.recv(1024)           # consume the request headers
+                cl.recv(1024)
                 send_response(cl, dashboard_html())
             finally:
-                cl.close()              # always close the socket, even on error
+                cl.close()
         except OSError:
-            pass  # accept() timed out — normal in non-blocking mode
+            pass
 
         time.sleep(0.05)
+
 
 if __name__ == "__main__":
     main()

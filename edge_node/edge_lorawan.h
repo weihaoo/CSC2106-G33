@@ -24,10 +24,39 @@ extern uint32_t uplinks_sent;
 extern uint32_t boot_time;
 extern SX1262 radio;
 extern volatile bool rxFlag;
+extern uint32_t metrics_window_start_ms;
+extern uint32_t metrics_window_delivered;
+extern uint32_t metrics_window_onair_bytes;
+extern uint32_t metrics_total_delivered;
+extern uint32_t metrics_total_expected;
+extern uint32_t metrics_total_lost;
+extern uint32_t metrics_hop_samples;
+extern uint32_t metrics_hop_sum;
+extern uint32_t metrics_latency_samples;
+extern int64_t metrics_latency_sum_ms;
 
 #ifdef ENABLE_LORAWAN
 extern LoRaWANNode lorawan_node;
 #endif
+
+// Optional metrics trailer appended after BridgeAggV1 records.
+#define BRIDGE_METRICS_TAG          0xA1
+#define BRIDGE_METRICS_VER          0x01
+#define BRIDGE_METRICS_TRAILER_LEN  32
+
+inline void append_u16_be(uint8_t *buf, uint8_t &idx, uint16_t v)
+{
+    buf[idx++] = (v >> 8) & 0xFF;
+    buf[idx++] = v & 0xFF;
+}
+
+inline void append_u32_be(uint8_t *buf, uint8_t &idx, uint32_t v)
+{
+    buf[idx++] = (v >> 24) & 0xFF;
+    buf[idx++] = (v >> 16) & 0xFF;
+    buf[idx++] = (v >> 8) & 0xFF;
+    buf[idx++] = v & 0xFF;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // LORAWAN UPLINK (PHASE 4 & 5)
@@ -69,6 +98,56 @@ inline void send_lorawan_uplink()
         uplink_buf[idx++] = rec->opaque_len;                   // actual payload length
         memcpy(&uplink_buf[idx], rec->opaque_payload, rec->opaque_len);
         idx += rec->opaque_len;
+    }
+
+    // Append edge-calculated runtime metrics for dashboard visualization.
+    if ((uint16_t)idx + BRIDGE_METRICS_TRAILER_LEN <= sizeof(uplink_buf))
+    {
+        uint32_t now_ms = millis();
+        uint32_t window_ms = now_ms - metrics_window_start_ms;
+        if (window_ms == 0) window_ms = 1;
+
+        uint32_t throughput_pps_x100 = ((uint64_t)metrics_window_delivered * 100000ULL) / window_ms;
+        uint32_t throughput_bps = ((uint64_t)metrics_window_onair_bytes * 8000ULL) / window_ms;
+
+        uint32_t pdr_x100 = 0;
+        uint32_t loss_x100 = 0;
+        if (metrics_total_expected > 0)
+        {
+            pdr_x100 = ((uint64_t)metrics_total_delivered * 10000ULL) / metrics_total_expected;
+            loss_x100 = ((uint64_t)metrics_total_lost * 10000ULL) / metrics_total_expected;
+        }
+
+        uint32_t hop_avg_x100 = 0;
+        if (metrics_hop_samples > 0)
+        {
+            hop_avg_x100 = ((uint64_t)metrics_hop_sum * 100ULL) / metrics_hop_samples;
+        }
+
+        uint32_t latency_avg_ms = 0;
+        if (metrics_latency_samples > 0)
+        {
+            latency_avg_ms = (uint32_t)(metrics_latency_sum_ms / (int64_t)metrics_latency_samples);
+        }
+
+        if (throughput_pps_x100 > 0xFFFF) throughput_pps_x100 = 0xFFFF;
+        if (pdr_x100 > 0xFFFF) pdr_x100 = 0xFFFF;
+        if (loss_x100 > 0xFFFF) loss_x100 = 0xFFFF;
+        if (hop_avg_x100 > 0xFFFF) hop_avg_x100 = 0xFFFF;
+        if (latency_avg_ms > 0xFFFF) latency_avg_ms = 0xFFFF;
+
+        uplink_buf[idx++] = BRIDGE_METRICS_TAG;
+        uplink_buf[idx++] = BRIDGE_METRICS_VER;
+        append_u32_be(uplink_buf, idx, window_ms);
+        append_u16_be(uplink_buf, idx, (uint16_t)throughput_pps_x100);
+        append_u32_be(uplink_buf, idx, throughput_bps);
+        append_u16_be(uplink_buf, idx, (uint16_t)pdr_x100);
+        append_u16_be(uplink_buf, idx, (uint16_t)loss_x100);
+        append_u32_be(uplink_buf, idx, metrics_total_delivered);
+        append_u32_be(uplink_buf, idx, metrics_total_expected);
+        append_u32_be(uplink_buf, idx, metrics_total_lost);
+        append_u16_be(uplink_buf, idx, (uint16_t)hop_avg_x100);
+        append_u16_be(uplink_buf, idx, (uint16_t)latency_avg_ms);
     }
 
     Serial.println(F("\n════════════════════════════════════════════════════"));
