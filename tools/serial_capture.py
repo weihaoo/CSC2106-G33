@@ -7,12 +7,21 @@ Captures serial output from edge node via USB for offline analysis.
 Each line is timestamped for precise timing analysis.
 
 Usage:
-    python serial_capture.py --port COM3 --output logs/test_run_001.log
+    python serial_capture.py --port /dev/ttyUSB0 --output logs/test_run.log
     python serial_capture.py --list  # List available ports
     python serial_capture.py         # Auto-detect port
 
 Dependencies:
     pip install pyserial
+
+Serial Port Examples:
+    Linux:   /dev/ttyUSB0, /dev/ttyACM0 (check with: ls /dev/tty*)
+    macOS:   /dev/cu.usbserial-*, /dev/cu.SLAB_USBtoUART
+    Windows: COM3, COM4, etc.
+
+Linux Permissions (if "Permission denied"):
+    sudo usermod -a -G dialout $USER
+    # Then log out and back in
 
 Press Ctrl+C to stop capture and save the log file.
 """

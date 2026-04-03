@@ -13,19 +13,39 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 | Node 0x05 | Edge | LilyGo T-Beam | Bridges to LoRaWAN |
 | WisGate | Gateway | RAK WisGate | LoRaWAN gateway |
 | Pi 4B | Server | Raspberry Pi 4 | Runs TTN MQTT + Dashboard |
+| **Laptop** | **Logger** | Any with USB | **Runs serial_capture.py** |
+
+---
+
+## Who Runs What
+
+| Script | Run On | Connected To | Purpose |
+|--------|--------|--------------|---------|
+| `serial_capture.py` | **Laptop** (USB to Edge) | Edge node via USB cable | Capture serial logs |
+| `metrics_analysis.py` | **Laptop** (after test) | N/A (reads log files) | Generate graphs/CSV |
+| `dashboard/main.py` | **Pi 4B** | TTN via MQTT | Live metrics display |
 
 ---
 
 ## Pre-Test Checklist
 
 1. **Flash firmware** to all nodes (`sensor_node/`, `relay_node/`, `edge_node/`)
-2. **Verify NTP sync** - Check serial output shows valid timestamps
-3. **Start serial capture** on Edge node:
+2. **Verify NTP sync** - Check serial output shows valid timestamps on BOTH sensor and edge
+3. **Connect Edge to laptop** via USB cable
+4. **Start serial capture** on laptop (connected to Edge node):
    ```bash
+   # On your laptop (Linux/Mac/Windows)
+   cd /path/to/CSC2106-G33
+   pip install pyserial
    python tools/serial_capture.py --output logs/scenario_X.log
    ```
-4. **Start dashboard** on Pi (via MQTT)
-5. **Label log files** clearly for each scenario
+5. **Start dashboard** on Pi 4B:
+   ```bash
+   # On Raspberry Pi 4B
+   pip install paho-mqtt flask
+   python dashboard/main.py
+   ```
+6. **Label log files** clearly for each scenario
 
 ---
 
@@ -226,14 +246,35 @@ void sendBurst(int count) {
 
 ## Post-Test Analysis
 
-After each scenario, run the analysis script:
+After each scenario, run the analysis script **on your laptop** (where the log files are):
 
 ```bash
-# Single scenario
+# On your laptop - make sure you have dependencies
+pip install matplotlib pandas
+
+# Create output directory
+mkdir -p report
+
+# Single scenario analysis
 python tools/metrics_analysis.py logs/baseline_10min.log --output report/baseline/
 
-# Compare multiple scenarios
+# Compare multiple scenarios (generates comparison charts)
 python tools/metrics_analysis.py logs/tx_*.log --output report/tx_comparison/
+```
+
+### Complete Workflow Example
+
+```bash
+# 1. DURING TEST: Run on laptop connected to Edge via USB
+python tools/serial_capture.py --output logs/baseline_10min.log
+# ... wait 10 minutes, then Ctrl+C to stop ...
+
+# 2. AFTER TEST: Generate report graphs (still on laptop)
+python tools/metrics_analysis.py logs/baseline_10min.log --output report/baseline/
+
+# 3. View results
+ls report/baseline/
+# -> summary.csv, packets.csv, latency_histogram.png, etc.
 ```
 
 ### Generated Files
