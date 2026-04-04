@@ -165,42 +165,75 @@ Follow this order for optimal workflow (minimizes reflashing and setup changes):
 
 **Goal:** Measure latency and PDR increase with hop count.
 
-**Indoor Testing Adaptation:**
-If outdoor space is limited, you can force multi-hop routing indoors by:
-- Placing nodes in different rooms with walls between them
-- Using metal barriers or Faraday cages to attenuate signal
-- Reducing TX power in firmware (if supported)
-- Positioning nodes at maximum indoor distance (opposite ends of building)
-
-**Physical Setup:**
-```
-[Sensor 0x01] --50m-- [Relay 0x03] --50m-- [Relay 0x04] --50m-- [Edge 0x05]
-```
+### Option A: Physical Spacing (Outdoor/Large Indoor)
 
 Place nodes in a line, far enough apart that direct links are weak/impossible.
 
+```
+[Sensor 0x03] --50m-- [Relay 0x02] --50m-- [Edge 0x01]
+```
+
+### Option B: Forced Topology via Whitelist (Indoor/Close Proximity)
+
+If you cannot physically space nodes apart, use the **PARENT_WHITELIST** feature
+to force a specific routing path. This makes nodes reject beacons from non-whitelisted
+parents, forcing multi-hop even when all nodes are within direct range.
+
+**How to configure (edit each node's .ino file before flashing):**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FORCED 3-HOP LINEAR TOPOLOGY                                                │
+│                                                                             │
+│   Sensor 0x04 → Sensor 0x03 → Relay 0x02 → Edge 0x01                       │
+│     (3 hops)      (2 hops)      (1 hop)      (edge)                        │
+│                                                                             │
+│ Configuration per node:                                                     │
+│   sensor_node.ino (0x04): #define PARENT_WHITELIST {0x03}                  │
+│   sensor_node.ino (0x03): #define PARENT_WHITELIST {0x02}                  │
+│   relay_node.ino  (0x02): #define PARENT_WHITELIST {0x01}                  │
+│   edge_node.ino   (0x01): (no whitelist needed - edge has no parent)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Steps to enable:**
+1. Open `sensor_node/sensor_node.ino` (for each sensor)
+2. Find the commented `// #define PARENT_WHITELIST {0x03}` line
+3. Uncomment and set the allowed parent ID(s)
+4. Flash the node
+5. Repeat for relay_node if needed
+
+**To disable (return to normal auto-routing):**
+- Comment out the `#define PARENT_WHITELIST` line and reflash
+
+**Serial output when whitelist rejects a beacon:**
+```
+BCN | WHITELIST_REJECT src=0x01 | not in whitelist (0x02)
+```
+
+### Test Procedure
+
+| Node | Whitelist | Expected Parent | Expected Hops |
+|------|-----------|-----------------|---------------|
+| 0x04 (Sensor) | `{0x03}` | 0x03 | 3 |
+| 0x03 (Sensor) | `{0x02}` | 0x02 | 2 |
+| 0x02 (Relay) | `{0x01}` | 0x01 | 1 |
+| 0x01 (Edge) | (none) | - | 0 |
+
 | Node | Action | Duration |
 |------|--------|----------|
-| 0x01 (Sensor) | Place at position A, TX every 5s | 10 min |
-| 0x03 (Relay) | Place at position B (middle) | 10 min |
-| 0x04 (Relay) | Place at position C | 10 min |
-| 0x05 (Edge) | Place at position D, capture logs | 10 min |
-
-**Variation:** Add a second sensor at position A to test multi-hop with load.
-
-| Node | Action | Duration |
-|------|--------|----------|
-| 0x01 (Sensor) | Position A | 10 min |
-| 0x02 (Sensor) | Position A (same location) | 10 min |
-| 0x03, 0x04 (Relay) | Positions B, C | 10 min |
-| 0x05 (Edge) | Position D, capture logs | 10 min |
+| All | Flash with whitelist config | - |
+| 0x01 (Edge) | Start first, capture logs | 10 min |
+| 0x02 (Relay) | Start after edge is up | 10 min |
+| 0x03 (Sensor) | Start after relay is up | 10 min |
+| 0x04 (Sensor) | Start last | 10 min |
 
 **Expected Metrics:**
-- Hop count: 2-3
-- Latency: 300-600 ms (additive per hop)
-- PDR: 80-90%
+- Hop count: 1, 2, or 3 (depending on source node)
+- Latency: Increases ~50-150ms per hop
+- PDR: 80-95%
 
-**Log files:** `logs/multihop_1sensor.log`, `logs/multihop_2sensor.log`
+**Log files:** `logs/multihop_forced.log`
 
 ### Per-Hop Latency Analysis
 

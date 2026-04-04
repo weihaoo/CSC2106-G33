@@ -137,6 +137,63 @@ class MetricsParser:
         """Return packets as a pandas DataFrame."""
         return pd.DataFrame(self.packets)
     
+    def detect_recovery_events(self, gap_threshold_s=10.0):
+        """
+        Detect node failure/recovery events based on gaps in packet reception.
+        
+        A "recovery event" is detected when:
+        1. A node stops sending packets for > gap_threshold_s
+        2. The node then resumes sending
+        
+        Args:
+            gap_threshold_s: Minimum gap duration to consider as failure (default: 10s)
+        
+        Returns:
+            List of recovery events: [{
+                'node_id': str,
+                'last_packet_time': str,
+                'first_packet_time': str,
+                'gap_duration_s': float,
+                'packets_before': int (seq of last packet before gap),
+                'packets_after': int (seq of first packet after gap)
+            }]
+        """
+        df = self.get_dataframe()
+        if df.empty or 'timestamp' not in df.columns:
+            return []
+        
+        events = []
+        
+        for node_id in df['src_id'].unique():
+            node_df = df[df['src_id'] == node_id].copy()
+            
+            # Convert timestamps to seconds
+            node_df['time_s'] = node_df['timestamp'].apply(MetricsPlotter.timestamp_to_seconds)
+            node_df = node_df.dropna(subset=['time_s']).sort_values('time_s')
+            
+            if len(node_df) < 2:
+                continue
+            
+            # Find gaps
+            times = node_df['time_s'].tolist()
+            seqs = node_df['seq'].tolist()
+            timestamps = node_df['timestamp'].tolist()
+            
+            for i in range(1, len(times)):
+                gap = times[i] - times[i-1]
+                if gap >= gap_threshold_s:
+                    events.append({
+                        'node_id': node_id,
+                        'last_packet_time': timestamps[i-1],
+                        'first_packet_time': timestamps[i],
+                        'gap_duration_s': round(gap, 2),
+                        'seq_before': seqs[i-1],
+                        'seq_after': seqs[i],
+                        'packets_lost_estimate': (seqs[i] - seqs[i-1] - 1) % 256
+                    })
+        
+        return sorted(events, key=lambda x: x['gap_duration_s'], reverse=True)
+    
     def get_stats(self):
         """Calculate summary statistics."""
         df = self.get_dataframe()
@@ -216,6 +273,14 @@ class MetricsParser:
                 stats['throughput_packets_per_s'] = len(df) / duration_s
                 stats['throughput_bytes_per_s'] = (len(df) * PACKET_SIZE_BYTES) / duration_s
                 stats['throughput_bits_per_s'] = stats['throughput_bytes_per_s'] * 8
+        
+        # Recovery events (for Scenario 6)
+        recovery_events = self.detect_recovery_events(gap_threshold_s=10.0)
+        if recovery_events:
+            stats['recovery_events'] = recovery_events
+            stats['total_recovery_events'] = len(recovery_events)
+            stats['max_recovery_time_s'] = max(e['gap_duration_s'] for e in recovery_events)
+            stats['avg_recovery_time_s'] = sum(e['gap_duration_s'] for e in recovery_events) / len(recovery_events)
         
         return stats
 
@@ -776,6 +841,15 @@ class MetricsPlotter:
                 summary['Metric'].append(f'Latency @ {hop_count} hop(s) - Count')
                 summary['Value'].append(str(hop_stats['count']))
         
+        # Add recovery event stats (Scenario 6)
+        if 'total_recovery_events' in stats:
+            summary['Metric'].extend(['Recovery Events Detected', 'Max Recovery Time (s)', 'Avg Recovery Time (s)'])
+            summary['Value'].extend([
+                str(stats['total_recovery_events']),
+                f"{stats['max_recovery_time_s']:.1f}",
+                f"{stats['avg_recovery_time_s']:.1f}"
+            ])
+        
         summary_df = pd.DataFrame(summary)
         summary_df.to_csv(self.output_dir / 'summary.csv', index=False)
         print(f"Saved: {self.output_dir / 'summary.csv'}")
@@ -783,6 +857,12 @@ class MetricsPlotter:
         # Also save raw packet data
         df.to_csv(self.output_dir / 'packets.csv', index=False)
         print(f"Saved: {self.output_dir / 'packets.csv'}")
+        
+        # Save recovery events to separate CSV if detected (Scenario 6)
+        if 'recovery_events' in stats and stats['recovery_events']:
+            recovery_df = pd.DataFrame(stats['recovery_events'])
+            recovery_df.to_csv(self.output_dir / 'recovery_events.csv', index=False)
+            print(f"Saved: {self.output_dir / 'recovery_events.csv'}")
 
 
 def main():
@@ -896,6 +976,20 @@ def print_metrics_table(stats):
         for hop_count, hop_stats in sorted(stats['latency_by_hop'].items()):
             print(f"  {hop_count} hop(s): mean={hop_stats['mean']:.1f}ms, "
                   f"std={hop_stats['std']:.1f}ms, n={hop_stats['count']}")
+    
+    # Recovery events (Scenario 6)
+    if 'total_recovery_events' in stats and stats['total_recovery_events'] > 0:
+        print("-" * 60)
+        print(f"{'Recovery Events Detected':<35} {stats['total_recovery_events']:>12} {'events':>10}")
+        print(f"{'Max Recovery Time':<35} {stats['max_recovery_time_s']:>11.1f} {'seconds':>10}")
+        print(f"{'Avg Recovery Time':<35} {stats['avg_recovery_time_s']:>11.1f} {'seconds':>10}")
+        print("-" * 60)
+        print("Recovery Event Details:")
+        for i, event in enumerate(stats['recovery_events'][:5], 1):  # Show top 5
+            print(f"  {i}. Node 0x{event['node_id']}: {event['gap_duration_s']:.1f}s gap "
+                  f"({event['last_packet_time']} → {event['first_packet_time']})")
+        if len(stats['recovery_events']) > 5:
+            print(f"  ... and {len(stats['recovery_events']) - 5} more (see recovery_events.csv)")
     
     print("=" * 60 + "\n")
 
