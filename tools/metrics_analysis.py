@@ -260,11 +260,13 @@ class MetricsPlotter:
         self.plot_latency_timeline(df)
         self.plot_pdr_by_node()
         self.plot_hop_distribution(df)
-        self.plot_latency_by_hop(df)  # NEW: per-hop latency analysis
+        self.plot_latency_by_hop(df)  # Per-hop latency analysis
+        self.plot_hop_performance_comparison(df)  # NEW: Hop count performance table
         self.plot_throughput_timeline(df)
         self.plot_packet_loss_by_time(df)
         self.plot_packet_loss_by_index(df)
         self.export_csv(df)
+        self.export_hop_comparison_csv(df)  # NEW: Per-hop CSV export
     
     def plot_latency_histogram(self, df):
         """Graph 1: Latency distribution histogram."""
@@ -409,6 +411,150 @@ class MetricsPlotter:
         plt.close(fig)
         print(f"Saved: {self.output_dir / 'latency_by_hop.png'}")
     
+    def plot_hop_performance_comparison(self, df):
+        """Graph: Performance comparison table by hop count (similar to reference paper Table I)."""
+        if 'hops' not in df.columns or df['hops'].dropna().empty:
+            return
+        
+        df = df.copy()
+        df['time_s'] = df['timestamp'].apply(self.timestamp_to_seconds)
+        df = df.dropna(subset=['time_s', 'hops'])
+        
+        if df.empty:
+            return
+        
+        hop_counts = sorted(df['hops'].unique())
+        if len(hop_counts) < 1:
+            return
+        
+        # Calculate metrics per hop count
+        metrics_data = []
+        bytes_per_packet = 21  # 10 header + 11 payload
+        
+        for hop in hop_counts:
+            hop_df = df[df['hops'] == hop]
+            n_packets = len(hop_df)
+            
+            # Calculate time range for throughput
+            if n_packets > 1:
+                duration = hop_df['time_s'].max() - hop_df['time_s'].min()
+                if duration > 0:
+                    throughput_pps = n_packets / duration
+                    bandwidth_bps = (n_packets * bytes_per_packet) / duration
+                else:
+                    throughput_pps = 0
+                    bandwidth_bps = 0
+            else:
+                throughput_pps = 0
+                bandwidth_bps = 0
+            
+            # Latency stats
+            latencies = hop_df['latency_ms'].dropna()
+            latency_mean = latencies.mean() if not latencies.empty else 0
+            latency_std = latencies.std() if len(latencies) > 1 else 0
+            
+            # RSSI stats
+            rssi_mean = hop_df['rssi'].mean() if 'rssi' in hop_df.columns else 0
+            
+            metrics_data.append({
+                'Hops': hop,
+                'Packets': n_packets,
+                'Throughput (pkt/s)': throughput_pps,
+                'Bandwidth (B/s)': bandwidth_bps,
+                'Latency Mean (ms)': latency_mean,
+                'Latency Std (ms)': latency_std,
+                'RSSI Mean (dBm)': rssi_mean
+            })
+        
+        # Create table figure
+        fig, ax = plt.subplots(figsize=(12, 3 + len(hop_counts) * 0.4))
+        ax.axis('off')
+        
+        # Create table
+        columns = ['Hops', 'Packets', 'Throughput\n(pkt/s)', 'Bandwidth\n(B/s)', 
+                   'Latency Mean\n(ms)', 'Latency Std\n(ms)', 'RSSI Mean\n(dBm)']
+        cell_text = []
+        for m in metrics_data:
+            cell_text.append([
+                f"{m['Hops']}",
+                f"{m['Packets']}",
+                f"{m['Throughput (pkt/s)']:.3f}",
+                f"{m['Bandwidth (B/s)']:.2f}",
+                f"{m['Latency Mean (ms)']:.1f}",
+                f"{m['Latency Std (ms)']:.1f}",
+                f"{m['RSSI Mean (dBm)']:.1f}"
+            ])
+        
+        table = ax.table(cellText=cell_text, colLabels=columns, loc='center', cellLoc='center')
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1.2, 1.8)
+        
+        # Style header
+        for i in range(len(columns)):
+            table[(0, i)].set_facecolor('#3b82f6')
+            table[(0, i)].set_text_props(color='white', fontweight='bold')
+        
+        # Alternate row colors
+        for i in range(1, len(metrics_data) + 1):
+            for j in range(len(columns)):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor('#f0f9ff')
+        
+        ax.set_title('Network Performance Metrics by Hop Count', fontsize=14, fontweight='bold', pad=20)
+        
+        fig.tight_layout()
+        fig.savefig(self.output_dir / 'hop_performance_table.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'hop_performance_table.png'}")
+    
+    def export_hop_comparison_csv(self, df):
+        """Export per-hop performance metrics to CSV (similar to reference paper Table I)."""
+        if 'hops' not in df.columns or df['hops'].dropna().empty:
+            return
+        
+        df = df.copy()
+        df['time_s'] = df['timestamp'].apply(self.timestamp_to_seconds)
+        df = df.dropna(subset=['time_s', 'hops'])
+        
+        if df.empty:
+            return
+        
+        hop_counts = sorted(df['hops'].unique())
+        bytes_per_packet = 21
+        
+        rows = []
+        for hop in hop_counts:
+            hop_df = df[df['hops'] == hop]
+            n_packets = len(hop_df)
+            
+            if n_packets > 1:
+                duration = hop_df['time_s'].max() - hop_df['time_s'].min()
+                throughput_pps = n_packets / duration if duration > 0 else 0
+                bandwidth_bps = (n_packets * bytes_per_packet) / duration if duration > 0 else 0
+            else:
+                throughput_pps = 0
+                bandwidth_bps = 0
+            
+            latencies = hop_df['latency_ms'].dropna()
+            
+            rows.append({
+                'Hop Count': hop,
+                'Packet Count': n_packets,
+                'Throughput (packets/s)': round(throughput_pps, 4),
+                'Bandwidth (bytes/s)': round(bandwidth_bps, 2),
+                'Latency Mean (ms)': round(latencies.mean(), 1) if not latencies.empty else None,
+                'Latency Median (ms)': round(latencies.median(), 1) if not latencies.empty else None,
+                'Latency Std (ms)': round(latencies.std(), 1) if len(latencies) > 1 else None,
+                'Latency Min (ms)': round(latencies.min(), 0) if not latencies.empty else None,
+                'Latency Max (ms)': round(latencies.max(), 0) if not latencies.empty else None,
+                'RSSI Mean (dBm)': round(hop_df['rssi'].mean(), 1) if 'rssi' in hop_df.columns else None
+            })
+        
+        hop_df = pd.DataFrame(rows)
+        hop_df.to_csv(self.output_dir / 'performance_by_hop.csv', index=False)
+        print(f"Saved: {self.output_dir / 'performance_by_hop.csv'}")
+
     def plot_throughput_timeline(self, df):
         """Graph 5: Throughput over time using actual timestamps."""
         if len(df) < 5:
@@ -696,11 +842,62 @@ Examples:
     
     print("=" * 50 + "\n")
     
+    # Print formatted metrics table (similar to reference paper Table I)
+    print_metrics_table(stats)
+    
     # Generate plots
     plotter = MetricsPlotter(metrics_parser, output_dir)
     plotter.plot_all()
     
     print(f"\nAll outputs saved to: {output_dir.absolute()}")
+
+
+def print_metrics_table(stats):
+    """Print a formatted metrics table similar to reference paper Table I."""
+    print("\n" + "=" * 60)
+    print("NETWORK PERFORMANCE METRICS TABLE")
+    print("=" * 60)
+    print(f"{'Metric':<35} {'Value':>12} {'Unit':>10}")
+    print("-" * 60)
+    
+    # Core metrics
+    print(f"{'Total Packets Received':<35} {stats.get('total_packets', 0):>12} {'packets':>10}")
+    print(f"{'Total Packets Dropped':<35} {stats.get('total_drops', 0):>12} {'packets':>10}")
+    print(f"{'Packet Delivery Ratio (PDR)':<35} {stats.get('pdr_overall', 100):>11.1f}% {'':<10}")
+    
+    # Throughput metrics
+    if 'throughput_packets_per_s' in stats:
+        print("-" * 60)
+        print(f"{'Test Duration':<35} {stats['duration_s']:>11.1f}s {'':<10}")
+        print(f"{'Throughput':<35} {stats['throughput_packets_per_s']:>11.3f} {'packets/s':>10}")
+        print(f"{'Bandwidth':<35} {stats['throughput_bytes_per_s']:>11.2f} {'bytes/s':>10}")
+        print(f"{'Bandwidth (bps)':<35} {stats['throughput_bits_per_s']:>11.0f} {'bps':>10}")
+    
+    # Latency metrics
+    if 'latency_mean' in stats:
+        print("-" * 60)
+        print(f"{'Latency (Min)':<35} {stats['latency_min']:>11.0f} {'ms':>10}")
+        print(f"{'Latency (Max)':<35} {stats['latency_max']:>11.0f} {'ms':>10}")
+        print(f"{'Latency (Mean)':<35} {stats['latency_mean']:>11.1f} {'ms':>10}")
+        print(f"{'Latency (Median)':<35} {stats['latency_median']:>11.1f} {'ms':>10}")
+        print(f"{'Latency (Std Dev)':<35} {stats['latency_std']:>11.1f} {'ms':>10}")
+    
+    # Hop metrics
+    if 'hops_mean' in stats:
+        print("-" * 60)
+        print(f"{'Hop Count (Min)':<35} {stats['hops_min']:>12} {'hops':>10}")
+        print(f"{'Hop Count (Max)':<35} {stats['hops_max']:>12} {'hops':>10}")
+        print(f"{'Hop Count (Mean)':<35} {stats['hops_mean']:>11.1f} {'hops':>10}")
+    
+    # Per-hop latency analysis
+    if 'latency_by_hop' in stats and stats['latency_by_hop']:
+        print("-" * 60)
+        print("Per-Hop Latency Analysis:")
+        for hop_count, hop_stats in sorted(stats['latency_by_hop'].items()):
+            print(f"  {hop_count} hop(s): mean={hop_stats['mean']:.1f}ms, "
+                  f"std={hop_stats['std']:.1f}ms, n={hop_stats['count']}")
+    
+    print("=" * 60 + "\n")
 
 
 if __name__ == '__main__':
