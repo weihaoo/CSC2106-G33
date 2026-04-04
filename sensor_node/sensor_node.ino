@@ -17,7 +17,24 @@
 // NODE CONFIGURATION -- Change before flashing!
 // Must be defined BEFORE including mesh_common.h
 // -----------------------------------------------------------------------------
-#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2
+#define NODE_ID       0x04    // 0x03 = Sensor 1, 0x04 = Sensor 2q
+
+// -----------------------------------------------------------------------------
+// PARENT WHITELIST (Optional - for forced multi-hop testing)
+// Uncomment ONE of the examples below to force specific parent selection.
+// This is useful for Scenario 3 (Multi-Hop Chain) when nodes are physically
+// close and you want to force a linear topology without spacing them apart.
+//
+// When enabled, this node will ONLY accept beacons from the listed node IDs.
+// All other beacons are rejected, forcing the desired routing path.
+//
+// EXAMPLES:
+//   Sensor 0x03: Force to use Relay 0x02 only → #define PARENT_WHITELIST {0x02}
+//   Sensor 0x04: Force to use Sensor 0x03 only → #define PARENT_WHITELIST {0x03}
+//
+// To disable: Keep the line commented out (normal auto-parent selection).
+// -----------------------------------------------------------------------------
+#define PARENT_WHITELIST {0x02}  // <-- Uncomment and set allowed parent(s)
 
 // -----------------------------------------------------------------------------
 // SHARED HEADERS (mesh_radio.h provides init_pmu, init_radio, pin defs, ISR;

@@ -251,6 +251,43 @@ inline void process_beacon(uint8_t *buf, int len, int rssi) {
         health    = buf[MESH_HEADER_SIZE + 3];
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PARENT WHITELIST FILTER (for forced multi-hop testing)
+    // If PARENT_WHITELIST is defined, only accept beacons from listed node IDs.
+    // This forces a specific topology without physical spacing.
+    //
+    // To enable: Add this line to your node's .ino file BEFORE #include mesh_common.h:
+    //   #define PARENT_WHITELIST {0x02}         // Only accept node 0x02 as parent
+    //   #define PARENT_WHITELIST {0x02, 0x03}   // Accept either 0x02 or 0x03
+    //
+    // To disable: Comment out or remove the PARENT_WHITELIST define.
+    // ─────────────────────────────────────────────────────────────────────────
+#ifdef PARENT_WHITELIST
+    {
+        const uint8_t whitelist[] = PARENT_WHITELIST;
+        const uint8_t whitelist_size = sizeof(whitelist) / sizeof(whitelist[0]);
+        bool allowed = false;
+        for (uint8_t i = 0; i < whitelist_size; i++) {
+            if (src_id == whitelist[i]) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) {
+            Serial.print("BCN | WHITELIST_REJECT src=0x");
+            Serial.print(src_id, HEX);
+            Serial.print(" | not in whitelist (");
+            for (uint8_t i = 0; i < whitelist_size; i++) {
+                if (i > 0) Serial.print(",");
+                Serial.print("0x");
+                Serial.print(whitelist[i], HEX);
+            }
+            Serial.println(")");
+            return;
+        }
+    }
+#endif
+
     // RSSI floor: reject beacons from nodes with unusable signal strength
     if (rssi < MIN_PARENT_RSSI) {
         Serial.print("BCN | REJECTED src=0x");

@@ -29,6 +29,18 @@
 #define NODE_ID       0x02    // Relay node
 
 // -----------------------------------------------------------------------------
+// PARENT WHITELIST (Optional - for forced multi-hop testing)
+// Uncomment to force this relay to ONLY accept specific parent(s).
+// Useful for Scenario 3 (Multi-Hop Chain) to force a linear topology.
+//
+// EXAMPLE:
+//   Relay 0x02: Force to use Edge 0x01 only → #define PARENT_WHITELIST {0x01}
+//
+// To disable: Keep the line commented out (normal auto-parent selection).
+// -----------------------------------------------------------------------------
+// #define PARENT_WHITELIST {0x01}  // <-- Uncomment and set allowed parent(s)
+
+// -----------------------------------------------------------------------------
 // SHARED HEADERS (mesh_radio.h provides init_pmu, init_radio, pin defs, ISR;
 //                 mesh_common.h provides dedup, send_ack, wait_for_ack,
 //                 score_parent, process_beacon, compute_queue_pct)
