@@ -35,7 +35,7 @@ CSC2106 Group 33 - Test Guide for Report Metrics
 
 | Priority | Scenarios | Time Required | Reason |
 |----------|-----------|---------------|--------|
-| **[REQUIRED]** | 1, 2, 3, 6, 7 | ~4-5 hours | Core mesh functionality, stress testing, resilience |
+| **[REQUIRED]** | 1, 2, 3, 6, 7 | ~5-6 hours | Core mesh functionality, stress testing, resilience, scalability |
 | **[OPTIONAL]** | 5 | ~30 min | Additional resilience data (requires firmware modification) |
 | **[SKIP]** | 4 | ~1.5 hours | Requires outdoor space (50-100m+ separation) |
 
@@ -45,13 +45,13 @@ Follow this order for optimal workflow (minimizes reflashing and setup changes):
 
 1. **Setup & Baseline** (30 min) - Scenario 1
 2. **Stress Testing** (30 min) - Scenario 2 (all sub-scenarios: 2a, 2b, 2c)
-3. **Full Load** (20 min) - Scenario 7
-4. **Multi-Hop Routing** (45 min) - Scenario 3 (both variations)
-5. **Resilience** (30 min) - Scenario 6
+3. **Load & Scalability** (40 min) - Scenario 7 (sub-scenarios 7a, 7b, 7c, 7d)
+4. **Multi-Hop Routing** (45 min) - Scenario 3 (both variations + per-hop analysis)
+5. **Resilience & Recovery** (30 min) - Scenario 6 (with recovery time measurement)
 6. **Optional: Burst** (30 min) - Scenario 5 (if time permits)
 7. **Analysis** (60 min) - Generate all reports and graphs
 
-**Total Core Testing**: ~4-5 hours (scenarios 1, 2, 3, 6, 7)
+**Total Core Testing**: ~5-6 hours (scenarios 1, 2, 3, 6, 7 with all sub-scenarios)
 
 ---
 
@@ -202,6 +202,22 @@ Place nodes in a line, far enough apart that direct links are weak/impossible.
 
 **Log files:** `logs/multihop_1sensor.log`, `logs/multihop_2sensor.log`
 
+### Per-Hop Latency Analysis
+
+After running the multi-hop test, analyze the relationship between hop count and latency:
+
+1. **Group packets by hop count**: Extract all packets with `hops=1`, `hops=2`, `hops=3`
+2. **Calculate average latency per hop count**:
+   - Average latency at 1 hop: `avg_latency_1`
+   - Average latency at 2 hops: `avg_latency_2`
+   - Average latency at 3 hops: `avg_latency_3`
+3. **Calculate per-hop forwarding delay**:
+   - Per-hop delay ≈ `(avg_latency_2 - avg_latency_1)` or `(avg_latency_3 - avg_latency_2)`
+   - If per-hop delay is consistent (~50-100ms), forwarding is efficient
+4. **Analyze variance**: Higher variance at more hops indicates congestion/retries
+
+**Expected per-hop forwarding delay**: 50-150ms (includes CAD, ACK wait, processing)
+
 ---
 
 ## Scenario 4: Distance/Signal Stress [SKIP - Outdoor Space Required]
@@ -296,16 +312,28 @@ void sendBurst(int count) {
     python tools/serial_capture.py --port COM12 --output logs/scenario_6_failure.log
     ```
 
-**Goal:** Test mesh resilience when nodes drop.
+**Goal:** Test mesh resilience when nodes drop and measure recovery time.
 
-| Time | Action |
-|------|--------|
-| 0:00 | Start all nodes normally |
-| 2:00 | Power off Relay 0x03 |
-| 4:00 | Power on Relay 0x03 |
-| 6:00 | Power off Sensor 0x02 |
-| 8:00 | Power on Sensor 0x02 |
-| 10:00 | End test |
+### Recovery Time Measurement Protocol
+
+To measure recovery time accurately:
+1. **Before power-off**: Note the timestamp of the last successful packet from the target node
+2. **During power-off**: Record the exact power-off time (use a stopwatch or note serial log timestamp)
+3. **After power-on**: Record the exact power-on time and note when first packet arrives
+4. **Recovery time** = (First successful packet timestamp) - (Power-on timestamp)
+
+**Expected Recovery Time**: Based on `PARENT_TIMEOUT_MS = 35000` (35s parent timeout), recovery should occur within:
+- Immediate if parent is still valid (no timeout)
+- Up to 35s if parent selection is required
+
+| Time | Action | Record |
+|------|--------|--------|
+| 0:00 | Start all nodes normally | Note first packet timestamps |
+| 2:00 | Power off Relay 0x03 | Note last packet time before power-off |
+| 4:00 | Power on Relay 0x03 | Note power-on time, watch for first packet |
+| 6:00 | Power off Sensor 0x02 | Note last packet time from 0x02 |
+| 8:00 | Power on Sensor 0x02 | Note power-on time, watch for first packet from 0x02 |
+| 10:00 | End test | |
 
 | Node | Action | Duration |
 |------|--------|----------|
@@ -315,28 +343,107 @@ void sendBurst(int count) {
 
 **Log file:** `logs/node_failure.log`
 
-**Expected:** Temporary PDR drop, recovery within 30s.
+**Expected:** 
+- Temporary PDR drop during failure
+- Recovery within 35s (parent timeout period)
+- Calculate actual recovery time from logs for report
+
+**Metrics to Extract:**
+- Recovery time for relay failure
+- Recovery time for sensor failure
+- PDR during failure window vs normal operation
+- Any route changes (parent selection events)
 
 ---
 
-## Scenario 7: All Nodes Active (Load Test) [REQUIRED]
+## Scenario 7: All Nodes Active (Load Test & Scalability) [REQUIRED]
+
+**Goal:** Maximum realistic load on the mesh and scalability analysis.
+
+### 7a: Baseline Load (5s interval)
 
 **RUN THIS TO CAPTURE LOGS:**
     ```
-    python tools/serial_capture.py --port COM12 --output logs/scenario_7_full_load.log
+    python tools/serial_capture.py --port COM12 --output logs/scenario_7a_5s.log
     ```
-
-**Goal:** Maximum realistic load on the mesh.
 
 | Node | Action | Duration |
 |------|--------|----------|
-| 0x01 (Sensor) | TX every 3s | 10 min |
-| 0x02 (Sensor) | TX every 3s | 10 min |
-| 0x03 (Relay) | Forward only | 10 min |
-| 0x04 (Relay) | Forward only | 10 min |
-| 0x05 (Edge) | Capture logs | 10 min |
+| 0x01 (Sensor) | TX every 5s (`TX_INTERVAL_MS = 5000`) | 5 min |
+| 0x02 (Sensor) | TX every 5s (`TX_INTERVAL_MS = 5000`) | 5 min |
+| 0x03, 0x04 (Relay) | Forward only | 5 min |
+| 0x05 (Edge) | Capture logs | 5 min |
 
-**Log file:** `logs/full_load.log`
+**Log file:** `logs/scenario_7a_5s.log`
+
+### 7b: Standard Load (3s interval)
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_7b_3s.log
+    ```
+
+| Node | Action | Duration |
+|------|--------|----------|
+| 0x01 (Sensor) | TX every 3s (`TX_INTERVAL_MS = 3000`) | 5 min |
+| 0x02 (Sensor) | TX every 3s (`TX_INTERVAL_MS = 3000`) | 5 min |
+| 0x03, 0x04 (Relay) | Forward only | 5 min |
+| 0x05 (Edge) | Capture logs | 5 min |
+
+**Log file:** `logs/scenario_7b_3s.log`
+
+### 7c: High Load - Simulating ~10 Sensors (1s interval)
+
+With 2 sensors at 1s interval, this simulates the aggregate traffic of ~10 sensors at 5s interval.
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_7c_1s.log
+    ```
+
+| Node | Action | Duration |
+|------|--------|----------|
+| 0x01 (Sensor) | TX every 1s (`TX_INTERVAL_MS = 1000`) | 5 min |
+| 0x02 (Sensor) | TX every 1s (`TX_INTERVAL_MS = 1000`) | 5 min |
+| 0x03, 0x04 (Relay) | Forward only | 5 min |
+| 0x05 (Edge) | Capture logs | 5 min |
+
+**Log file:** `logs/scenario_7c_1s.log`
+
+### 7d: Maximum Load - Simulating ~20 Sensors (500ms interval)
+
+With 2 sensors at 500ms interval, this simulates the aggregate traffic of ~20 sensors at 5s interval.
+
+**RUN THIS TO CAPTURE LOGS:**
+    ```
+    python tools/serial_capture.py --port COM12 --output logs/scenario_7d_500ms.log
+    ```
+
+| Node | Action | Duration |
+|------|--------|----------|
+| 0x01 (Sensor) | TX every 500ms (`TX_INTERVAL_MS = 500`) | 3 min |
+| 0x02 (Sensor) | TX every 500ms (`TX_INTERVAL_MS = 500`) | 3 min |
+| 0x03, 0x04 (Relay) | Forward only | 3 min |
+| 0x05 (Edge) | Capture logs | 3 min |
+
+**Log file:** `logs/scenario_7d_500ms.log`
+
+### Expected Results for Scalability Analysis
+
+| Sub-scenario | TX Interval | Simulated Sensors | Expected PDR | Expected Latency |
+|--------------|-------------|-------------------|--------------|------------------|
+| 7a | 5s | 2 | >95% | 100-300ms |
+| 7b | 3s | ~3 | >90% | 100-400ms |
+| 7c | 1s | ~10 | 70-90% | 200-500ms |
+| 7d | 500ms | ~20 | 50-80% | 300-800ms |
+
+### Scalability Calculation for Report
+
+- **LoRa duty cycle**: ~1% recommended for AS923 regulatory compliance
+- **Packet airtime at SF7/125kHz**: ~50ms for 21-byte packet (10-byte header + 11-byte payload)
+- **Theoretical max packets/second**: ~20 (at 100% duty cycle)
+- **With ACKs + retries**: ~5-10 effective packets/second
+- **Practical sensor limit**: Based on test results, extrapolate max sensors at target PDR (e.g., 95%)
 
 ---
 

@@ -48,9 +48,9 @@ PATTERNS = {
     'latency': re.compile(
         r'LATENCY\s*\|\s*src=0x([0-9A-Fa-f]+).*one-way\s*~?\s*(\d+)\s*ms'
     ),
-    # [DROP] ... src=0x03 seq=42
+    # [DROP] CRC_FAIL | src=0x03 seq=42  OR  [DROP] Duplicate | src=0x03 seq=42
     'drop': re.compile(
-        r'\[DROP\].*src=0x([0-9A-Fa-f]+).*seq=(\d+)'
+        r'\[DROP\].*\|\s*src=0x([0-9A-Fa-f]+)\s*seq=(\d+)'
     ),
     # Timestamp at start of line: [HH:MM:SS.mmm]
     'timestamp': re.compile(
@@ -165,6 +165,19 @@ class MetricsParser:
             stats['hops_min'] = hops.min()
             stats['hops_max'] = hops.max()
             stats['hops_mean'] = hops.mean()
+            
+            # Per-hop latency analysis (for multi-hop scenarios)
+            latency_by_hop = {}
+            for hop_count in hops.unique():
+                hop_latencies = df[df['hops'] == hop_count]['latency_ms'].dropna()
+                if not hop_latencies.empty:
+                    latency_by_hop[int(hop_count)] = {
+                        'mean': hop_latencies.mean(),
+                        'median': hop_latencies.median(),
+                        'std': hop_latencies.std(),
+                        'count': len(hop_latencies)
+                    }
+            stats['latency_by_hop'] = latency_by_hop
         
         # PDR calculation (requires sequence analysis)
         pdr_by_node = {}
@@ -187,6 +200,22 @@ class MetricsParser:
         
         stats['pdr_by_node'] = pdr_by_node
         stats['pdr_overall'] = sum(pdr_by_node.values()) / len(pdr_by_node) if pdr_by_node else 100.0
+        
+        # Throughput calculation (bytes per second)
+        # SENSOR_PAYLOAD_SIZE = 11 bytes, MESH_HEADER_SIZE = 10 bytes
+        PACKET_SIZE_BYTES = 21  # 10-byte header + 11-byte payload
+        
+        # Calculate test duration from timestamps if available
+        timestamps = df['timestamp'].dropna()
+        if len(timestamps) >= 2:
+            start_ts = MetricsPlotter.timestamp_to_seconds(timestamps.iloc[0])
+            end_ts = MetricsPlotter.timestamp_to_seconds(timestamps.iloc[-1])
+            if start_ts is not None and end_ts is not None and end_ts > start_ts:
+                duration_s = end_ts - start_ts
+                stats['duration_s'] = duration_s
+                stats['throughput_packets_per_s'] = len(df) / duration_s
+                stats['throughput_bytes_per_s'] = (len(df) * PACKET_SIZE_BYTES) / duration_s
+                stats['throughput_bits_per_s'] = stats['throughput_bytes_per_s'] * 8
         
         return stats
 
@@ -231,6 +260,7 @@ class MetricsPlotter:
         self.plot_latency_timeline(df)
         self.plot_pdr_by_node()
         self.plot_hop_distribution(df)
+        self.plot_latency_by_hop(df)  # NEW: per-hop latency analysis
         self.plot_throughput_timeline(df)
         self.plot_packet_loss_by_time(df)
         self.plot_packet_loss_by_index(df)
@@ -324,6 +354,61 @@ class MetricsPlotter:
         plt.close(fig)
         print(f"Saved: {self.output_dir / 'hop_distribution.png'}")
     
+    def plot_latency_by_hop(self, df):
+        """Graph 4b: Latency distribution grouped by hop count (for multi-hop analysis)."""
+        df = df.dropna(subset=['latency_ms'])
+        if df.empty or df['hops'].nunique() < 2:
+            print("Insufficient hop diversity for per-hop latency graph")
+            return
+        
+        # Group by hop count
+        hop_groups = df.groupby('hops')['latency_ms']
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Box plot (left)
+        hop_data = [hop_groups.get_group(h).values for h in sorted(df['hops'].unique())]
+        hop_labels = [f'{int(h)} hop{"s" if h > 1 else ""}' for h in sorted(df['hops'].unique())]
+        
+        bp = ax1.boxplot(hop_data, labels=hop_labels, patch_artist=True)
+        colors = ['#60a5fa', '#22c55e', '#eab308', '#ef4444', '#a855f7']
+        for patch, color in zip(bp['boxes'], colors[:len(bp['boxes'])]):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        
+        ax1.set_xlabel('Hop Count')
+        ax1.set_ylabel('Latency (ms)')
+        ax1.set_title('Latency Distribution by Hop Count')
+        
+        # Mean latency bar chart (right)
+        mean_latencies = [hop_groups.get_group(h).mean() for h in sorted(df['hops'].unique())]
+        hop_counts = sorted(df['hops'].unique())
+        
+        bars = ax2.bar(range(len(hop_counts)), mean_latencies, color=colors[:len(hop_counts)], alpha=0.7)
+        ax2.set_xticks(range(len(hop_counts)))
+        ax2.set_xticklabels(hop_labels)
+        ax2.set_xlabel('Hop Count')
+        ax2.set_ylabel('Mean Latency (ms)')
+        ax2.set_title('Average Latency by Hop Count')
+        
+        # Add value labels and per-hop delay calculation
+        for i, (bar, mean_lat) in enumerate(zip(bars, mean_latencies)):
+            ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 5, 
+                    f'{mean_lat:.0f} ms', ha='center', va='bottom', fontsize=10)
+        
+        # Calculate and display per-hop forwarding delay
+        if len(mean_latencies) >= 2:
+            per_hop_delays = [mean_latencies[i+1] - mean_latencies[i] for i in range(len(mean_latencies)-1)]
+            avg_per_hop = sum(per_hop_delays) / len(per_hop_delays)
+            ax2.text(0.95, 0.95, f'Avg per-hop delay: ~{avg_per_hop:.0f} ms', 
+                    transform=ax2.transAxes, ha='right', va='top', fontsize=11,
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        fig.tight_layout()
+        fig.savefig(self.output_dir / 'latency_by_hop.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Saved: {self.output_dir / 'latency_by_hop.png'}")
+    
     def plot_throughput_timeline(self, df):
         """Graph 5: Throughput over time using actual timestamps."""
         if len(df) < 5:
@@ -342,8 +427,8 @@ class MetricsPlotter:
         start_time = df['time_s'].min()
         df['elapsed_s'] = df['time_s'] - start_time
         
-        # Estimate bytes per packet (LoRa mesh packet size)
-        bytes_per_packet = 25  # ~10 byte header + ~15 byte payload
+        # Packet size: 10-byte mesh header + 11-byte sensor payload = 21 bytes
+        bytes_per_packet = 21  # MESH_HEADER_SIZE + SENSOR_PAYLOAD_SIZE
         
         # Rolling window in seconds
         window_s = 30.0
@@ -382,12 +467,12 @@ class MetricsPlotter:
         
         ax.set_xlabel('Elapsed Time (seconds)')
         ax.set_ylabel('Throughput (B/s)')
-        ax.set_title('Throughput Over Time (30s Rolling Window)')
+        ax.set_title('LoRa Mesh Throughput Over Time (30s Rolling Window)')
         
         # Add average line
         avg_throughput = sum(throughput) / len(throughput) if throughput else 0
         ax.axhline(avg_throughput, color='#ef4444', linestyle='--', linewidth=1.5, 
-                   label=f'Avg: {avg_throughput:.1f} B/s')
+                   label=f'Avg: {avg_throughput:.1f} B/s ({avg_throughput * 8:.0f} bps)')
         ax.legend()
         
         fig.savefig(self.output_dir / 'throughput_timeline.png', dpi=150, bbox_inches='tight')
@@ -526,6 +611,24 @@ class MetricsPlotter:
                 stats['hops_max'],
                 f"{stats['hops_mean']:.1f}"
             ])
+        
+        # Add throughput stats
+        if 'throughput_bytes_per_s' in stats:
+            summary['Metric'].extend(['Test Duration (s)', 'Throughput (packets/s)', 'Throughput (bytes/s)', 'Throughput (bps)'])
+            summary['Value'].extend([
+                f"{stats['duration_s']:.1f}",
+                f"{stats['throughput_packets_per_s']:.2f}",
+                f"{stats['throughput_bytes_per_s']:.1f}",
+                f"{stats['throughput_bits_per_s']:.0f}"
+            ])
+        
+        # Add per-hop latency analysis
+        if 'latency_by_hop' in stats and stats['latency_by_hop']:
+            for hop_count, hop_stats in sorted(stats['latency_by_hop'].items()):
+                summary['Metric'].append(f'Latency @ {hop_count} hop(s) - Mean (ms)')
+                summary['Value'].append(f"{hop_stats['mean']:.1f}")
+                summary['Metric'].append(f'Latency @ {hop_count} hop(s) - Count')
+                summary['Value'].append(str(hop_stats['count']))
         
         summary_df = pd.DataFrame(summary)
         summary_df.to_csv(self.output_dir / 'summary.csv', index=False)
