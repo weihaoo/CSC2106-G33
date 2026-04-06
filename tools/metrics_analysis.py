@@ -237,23 +237,30 @@ class MetricsParser:
             stats['latency_by_hop'] = latency_by_hop
         
         # PDR calculation (requires sequence analysis)
+        # Process in chronological order to detect resets (seq drops)
         pdr_by_node = {}
         for src_id in df['src_id'].unique():
-            node_df = df[df['src_id'] == src_id].sort_values('seq')
+            node_df = df[df['src_id'] == src_id].sort_values('timestamp')
             if len(node_df) < 2:
                 pdr_by_node[src_id] = 100.0
                 continue
             
             seqs = node_df['seq'].tolist()
-            expected = 0
-            for i in range(1, len(seqs)):
-                gap = (seqs[i] - seqs[i-1]) % 256
-                if gap > 1:
-                    expected += gap - 1
+            total_received = len(seqs)
+            total_missing = 0
             
-            received = len(seqs)
-            total = received + expected
-            pdr_by_node[src_id] = (received / total) * 100 if total > 0 else 100.0
+            for i in range(1, len(seqs)):
+                prev_seq, curr_seq = seqs[i-1], seqs[i]
+                # Detect reset: seq drops (current < previous, not a wrap from 255->0)
+                if curr_seq < prev_seq:
+                    # Reset detected, start new session - no gap counted
+                    continue
+                gap = curr_seq - prev_seq
+                if gap > 1:
+                    total_missing += gap - 1
+            
+            total = total_received + total_missing
+            pdr_by_node[src_id] = (total_received / total) * 100 if total > 0 else 100.0
         
         stats['pdr_by_node'] = pdr_by_node
         stats['pdr_overall'] = sum(pdr_by_node.values()) / len(pdr_by_node) if pdr_by_node else 100.0
